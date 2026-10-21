@@ -201,7 +201,14 @@ def _discover_brain_view_paths_atlas(config: BrainPipelineConfig) -> BrainViewPa
     atlas = resolve_brain_atlas_from_config(config.atlas)
     transform_params = _load_transform_params(save_path)
     atlas_resolved = resolve_brain_atlas_with_config(transform_params.brain_atlas, config.atlas)
-    division = ensure_division_map(atlas_resolved)
+    division_labels_path: Path | None = None
+    division_legend_path: Path | None = None
+    try:
+        division = ensure_division_map(atlas_resolved)
+        division_labels_path = division.paths.labels_tiff.resolve()
+        division_legend_path = division.paths.legend_csv.resolve()
+    except (FileNotFoundError, OSError, ValueError):
+        pass
 
     registered_channels: dict[int, Path] = {}
     if vr.is_dir():
@@ -238,8 +245,8 @@ def _discover_brain_view_paths_atlas(config: BrainPipelineConfig) -> BrainViewPa
         template_path=atlas.template_path.resolve(),
         annotation_path=atlas.annotation_path.resolve(),
         boundary_path=None,
-        division_labels_path=division.paths.labels_tiff.resolve(),
-        division_legend_path=division.paths.legend_csv.resolve(),
+        division_labels_path=division_labels_path,
+        division_legend_path=division_legend_path,
         registered_channels=registered_channels,
         point_npz_paths=point_npz_paths,
         mask_paths=mask_paths,

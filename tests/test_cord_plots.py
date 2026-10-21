@@ -55,6 +55,7 @@ def test_save_cord_annotation_preview_writes_png(tmp_path: Path) -> None:
 
 
 def test_save_cord_annotation_preview_safe_on_background_thread(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib.backends.backend_qtagg", exc_type=ImportError)
     matplotlib.use("QtAgg", force=True)
     volume = np.zeros((40, 20, 30), dtype=np.uint8)
     annotation = np.zeros((40, 20, 30), dtype=np.uint16)

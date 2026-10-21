@@ -11,7 +11,13 @@ import pytest
 from lightsuite.analysis.cord_counts import CORD_TIDY_COLUMNS
 from lightsuite.analysis.cord_heatmap import PAPER_STRUCTURE_ACRONYMS
 from lightsuite.config.models import CordAtlasConfig, CordRegistrationConfig, CordSampleConfig, SpinalCordPipelineConfig
-from lightsuite.gui.spinal_stats_plots import CordStatsPlotsPanel, attach_spinal_stats_plots
+# The panel module needs a Qt binding at import time; skip when the gui extra is missing.
+pytest.importorskip("matplotlib.backends.backend_qtagg", exc_type=ImportError)
+
+from lightsuite.gui.spinal_stats_plots import (  # noqa: E402
+    CordStatsPlotsPanel,
+    attach_spinal_stats_plots,
+)
 
 
 def _config_with_stats(tmp_path: Path, *, split_hemispheres: bool = False) -> SpinalCordPipelineConfig:
