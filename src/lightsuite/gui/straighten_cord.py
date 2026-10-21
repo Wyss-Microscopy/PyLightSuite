@@ -1,8 +1,31 @@
-"""Napari GUI for spinal cord straightening (spinal_cord_aligner.m port)."""
+"""Napari GUI for spinal cord straightening (spinal_cord_aligner.m port).
+
+Layout and controls follow the MATLAB GUI:
+
+* left: the current transverse slice with the clicked points and the fitted
+  centre / dorsoventral axis;
+* right: the fitted position (x, y) and angle against slice number, slice 1 at the
+  top. Click either plot to jump to that slice.
+
+Controls (no layer selection needed)::
+
+    Left click    anterior / front   (green)
+    Right click   posterior / back   (red)
+    Middle click  central canal      (blue)
+    Scroll, <- -> previous / next slice
+    Ctrl+scroll   zoom in / out around the cursor; r or Home resets the view
+    c             clear all points on this slice
+    x             delete the point nearest the cursor
+    Space         jump to the largest gap between annotated slices
+    l             set the regularisation
+    p             show / hide the fit
+    s             save
+
+Clicks are stored like MATLAB's: ``[x, y]`` = ``[column, row]``, 1-based.
+"""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,18 +46,28 @@ from lightsuite.registration.straightening_optimizer import run_straightening_op
 
 console = Console()
 
-POINT_MARKER_SIZE = 2
+POINT_KINDS = ("cen", "ant", "pos")
+ZOOM_STEP = 1.25  # per Ctrl+scroll tick
+DELETE_RADIUS_PX = 50.0  # 'x' removes a point only if the cursor is this close (MATLAB)
+KEY_HELP = (
+    "[L-click] Ant | [R-click] Pos | [M-click] Cen | [scroll / ← →] Slice | [Space] Largest gap\n"
+    "[Ctrl+scroll] Zoom | [r] Reset zoom | [c] Clear slice | [x] Delete nearest | "
+    "[l] Set reg | [p] Show fit | [s] Save"
+)
 
 
-def fit_overlay_geometry(fit: dict[str, np.ndarray], slice_index: int) -> dict[str, np.ndarray] | None:
-    """Compute napari overlay geometry for one slice (spinal_cord_aligner.m update_view)."""
+# --------------------------------------------------------------------------- pure helpers
+def fit_overlay_geometry(
+    fit: dict[str, np.ndarray], slice_index: int
+) -> dict[str, np.ndarray] | None:
+    """Napari (row, col) geometry of the fitted centre and axis on one slice (update_view)."""
     cx = float(fit["fit_x"][slice_index])
     cy = float(fit["fit_y"][slice_index])
     th = float(fit["fit_theta"][slice_index])
     if not np.isfinite(cx) or not np.isfinite(cy) or not np.isfinite(th):
         return None
     r = float(fit["fit_rad"][slice_index])
-    if not np.isfinite(r):
+    if not np.isfinite(r) or r <= 0:
         r = 10.0
     dx = r * np.cos(th)
     dy = r * np.sin(th)
@@ -50,9 +83,7 @@ def fit_overlay_geometry(fit: dict[str, np.ndarray], slice_index: int) -> dict[s
 
 
 def clear_all_alignment_points(
-    user_cen: np.ndarray,
-    user_ant: np.ndarray,
-    user_pos: np.ndarray,
+    user_cen: np.ndarray, user_ant: np.ndarray, user_pos: np.ndarray
 ) -> None:
     user_cen[:] = np.nan
     user_ant[:] = np.nan
@@ -78,6 +109,42 @@ def pop_last_alignment_edit(
     return slice_idx
 
 
+def delete_nearest_point(
+    arrays: dict[str, np.ndarray],
+    slice_idx: int,
+    xy: tuple[float, float],
+    max_dist: float = DELETE_RADIUS_PX,
+) -> str | None:
+    """Remove the point on ``slice_idx`` closest to ``xy`` (MATLAB 'x'); return its kind."""
+    best_kind, best_d = None, np.inf
+    for kind in POINT_KINDS:
+        pt = arrays[kind][slice_idx]
+        if np.isnan(pt[0]):
+            continue
+        d = float(np.hypot(pt[0] - xy[0], pt[1] - xy[1]))
+        if d < best_d:
+            best_kind, best_d = kind, d
+    if best_kind is None or best_d >= max_dist:
+        return None
+    arrays[best_kind][slice_idx] = [np.nan, np.nan]
+    return best_kind
+
+
+def largest_gap_slice(has_data: np.ndarray, current: int) -> int:
+    """Slice farthest from any annotated slice (MATLAB Space: max of bwdist)."""
+    has_data = np.asarray(has_data, dtype=bool)
+    n = has_data.size
+    if not has_data.any():
+        return n // 2
+    idx = np.flatnonzero(has_data)
+    pos = np.arange(n)
+    j = np.clip(np.searchsorted(idx, pos), 1, len(idx)) - 1
+    dist = np.minimum(np.abs(pos - idx[j]), np.abs(pos - idx[np.minimum(j + 1, len(idx) - 1)]))
+    dist[current] = 0
+    return int(np.argmax(dist))
+
+
+# --------------------------------------------------------------------------- data
 @dataclass
 class StraightenCordData:
     regvol: np.ndarray
@@ -90,15 +157,31 @@ class StraightenCordData:
     lambda_ang: float
     fit: dict[str, np.ndarray]
 
+    def arrays(self) -> dict[str, np.ndarray]:
+        return {"cen": self.user_cen, "ant": self.user_ant, "pos": self.user_pos}
+
+    def refit(self) -> None:
+        self.fit = run_straightening_optimizer(
+            self.user_cen,
+            self.user_ant,
+            self.user_pos,
+            lambda_pos=self.lambda_pos,
+            lambda_ang=self.lambda_ang,
+        )
+
 
 def _normalize_display(regvol: np.ndarray) -> np.ndarray:
+    """uint8 display volume scaled between the 0.1 and 99.9 % quantiles (MATLAB)."""
     rng = np.random.default_rng(1)
     idx = rng.choice(regvol.size, size=min(regvol.size, 20_000), replace=False)
     sample = regvol.ravel()[idx].astype(np.float32)
     vmax = float(np.quantile(sample, 0.999))
     vmin = float(np.quantile(sample, 0.001))
-    scaled = (regvol.astype(np.float32) - vmin) / max(vmax - vmin, 1e-6)
-    return np.clip(scaled, 0, 1)
+    out = np.empty(regvol.shape, dtype=np.uint8)
+    scale = 255.0 / max(vmax - vmin, 1e-6)
+    for z in range(regvol.shape[2]):
+        out[:, :, z] = np.clip((regvol[:, :, z].astype(np.float32) - vmin) * scale, 0, 255)
+    return out
 
 
 def load_straighten_data(config: SpinalCordPipelineConfig) -> StraightenCordData:
@@ -118,19 +201,22 @@ def load_straighten_data(config: SpinalCordPipelineConfig) -> StraightenCordData
     lambda_ang = config.registration.straightening_lambda_ang
     if align_path.is_file():
         prev = SpinalAlignmentCheckpoint.load(align_path)
-        user_cen = _restore_points(prev.user_cen)
-        user_ant = _restore_points(prev.user_ant)
-        user_pos = _restore_points(prev.user_pos)
-        lambda_pos = prev.lambda_pos
-        lambda_ang = prev.lambda_ang
-    fit = run_straightening_optimizer(
-        user_cen,
-        user_ant,
-        user_pos,
-        lambda_pos=lambda_pos,
-        lambda_ang=lambda_ang,
-    )
-    return StraightenCordData(
+        if len(prev.user_cen) == n_slices:
+            user_cen = _restore_points(prev.user_cen)
+            user_ant = _restore_points(prev.user_ant)
+            user_pos = _restore_points(prev.user_pos)
+            lambda_pos = prev.lambda_pos
+            lambda_ang = prev.lambda_ang
+            console.print(
+                f"Loaded previous alignment ({align_path.name}; "
+                f"Reg: Pos={lambda_pos:.0f}, Ang={lambda_ang:.0f})"
+            )
+        else:
+            console.print(
+                f"[yellow]Ignoring {align_path.name}: it covers {len(prev.user_cen)} slices, "
+                f"the volume has {n_slices}.[/yellow]"
+            )
+    data = StraightenCordData(
         regvol=regvol,
         display_vol=_normalize_display(regvol),
         n_slices=n_slices,
@@ -139,8 +225,10 @@ def load_straighten_data(config: SpinalCordPipelineConfig) -> StraightenCordData
         user_pos=user_pos,
         lambda_pos=lambda_pos,
         lambda_ang=lambda_ang,
-        fit=fit,
+        fit={},
     )
+    data.refit()
+    return data
 
 
 def _restore_points(raw: list[list[float | None]]) -> np.ndarray:
@@ -162,17 +250,9 @@ def _serialize_points(points: np.ndarray) -> list[list[float | None]]:
     return out
 
 
-def save_alignment_checkpoint(
-    data: StraightenCordData,
-    save_path: Path,
-) -> Path:
-    fit = run_straightening_optimizer(
-        data.user_cen,
-        data.user_ant,
-        data.user_pos,
-        lambda_pos=data.lambda_pos,
-        lambda_ang=data.lambda_ang,
-    )
+def save_alignment_checkpoint(data: StraightenCordData, save_path: Path) -> Path:
+    data.refit()
+    fit = data.fit
     checkpoint = SpinalAlignmentCheckpoint(
         user_cen=_serialize_points(data.user_cen),
         user_ant=_serialize_points(data.user_ant),
@@ -195,32 +275,90 @@ def _headless_default_alignment(data: StraightenCordData) -> StraightenCordData:
         data.user_cen[z] = [cx + 1.0, cy + 1.0]
         data.user_ant[z] = [cx + 1.0, cy - 8.0]
         data.user_pos[z] = [cx + 1.0, cy + 8.0]
-    data.fit = run_straightening_optimizer(
-        data.user_cen,
-        data.user_ant,
-        data.user_pos,
-        lambda_pos=data.lambda_pos,
-        lambda_ang=data.lambda_ang,
-    )
+    data.refit()
     return data
 
 
+# --------------------------------------------------------------------------- side plots
+class _SidePlots:
+    """Position and angle against slice number (MATLAB ax_pos / ax_ang)."""
+
+    def __init__(self, data: StraightenCordData, on_pick_slice) -> None:
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
+
+        self.data = data
+        n = data.n_slices
+        rows, cols = data.regvol.shape[:2]
+        self.slices = np.arange(1, n + 1)
+
+        self.figure = Figure(figsize=(4.2, 6), layout="constrained")
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.ax_pos, self.ax_ang = self.figure.subplots(1, 2, sharey=True)
+
+        ax = self.ax_pos
+        ax.grid(True, alpha=0.4)
+        ax.set_xlabel("Position (px)")
+        ax.set_ylabel("Slice number")
+        maxpos = max(rows, cols)
+        ax.set_xlim(0, maxpos)
+        ax.set_xticks([0, round(maxpos / 2), maxpos])
+        ax.set_ylim(n, 1)  # slice 1 at the top
+        (self.fit_x,) = ax.plot([], [], "b-", lw=1.2, label="Fit X")
+        (self.fit_y,) = ax.plot([], [], "m-", lw=1.2, label="Fit Y")
+        (self.obs_x,) = ax.plot([], [], "bo", ms=4, mfc="none")
+        (self.obs_y,) = ax.plot([], [], "mo", ms=4, mfc="none")
+        self.cursor_pos = ax.axhline(1, color="k", ls="--", lw=1)
+        ax.legend(loc="upper right", fontsize=8)
+
+        ax = self.ax_ang
+        ax.grid(True, alpha=0.4)
+        ax.set_xlabel("Angle (rad)")
+        ax.set_xlim(-np.pi - 0.1, np.pi + 0.1)
+        ax.tick_params(labelleft=False)
+        (self.fit_th,) = ax.plot([], [], color=(0, 0.6, 0), lw=1.2)
+        (self.obs_th,) = ax.plot([], [], "o", color=(0, 0.6, 0), ms=4, mfc="none")
+        self.cursor_ang = ax.axhline(1, color="k", ls="--", lw=1)
+
+        def _on_click(event) -> None:
+            if event.inaxes in (self.ax_pos, self.ax_ang) and event.ydata is not None:
+                on_pick_slice(int(round(event.ydata)) - 1)
+
+        self.canvas.mpl_connect("button_press_event", _on_click)
+
+    def update_fit(self) -> None:
+        fit = self.data.fit
+        s = self.slices
+        self.fit_x.set_data(fit["fit_x"], s)
+        self.fit_y.set_data(fit["fit_y"], s)
+        self.obs_x.set_data(fit["obs_x"], s)
+        self.obs_y.set_data(fit["obs_y"], s)
+        self.fit_th.set_data(fit["fit_theta"], s)
+        self.obs_th.set_data(fit["obs_th"], s)
+
+    def update_cursor(self, slice_idx: int) -> None:
+        y = slice_idx + 1
+        self.cursor_pos.set_ydata([y, y])
+        self.cursor_ang.set_ydata([y, y])
+        self.canvas.draw_idle()
+
+
+# --------------------------------------------------------------------------- GUI
 def attach_spinal_straighten(
     viewer: Any,
     config: SpinalCordPipelineConfig,
     *,
     data: StraightenCordData | None = None,
 ) -> DockStageController:
-    """Attach spinal cord straightening controls to an existing napari viewer."""
+    """Attach the straightening GUI to an existing napari viewer."""
     from napari.utils.notifications import show_info
-    from qtpy.QtCore import Qt, QTimer
-    from qtpy.QtGui import QFont, QKeySequence, QShortcut
     from qtpy.QtWidgets import (
+        QDialog,
+        QDialogButtonBox,
+        QDoubleSpinBox,
+        QFormLayout,
         QHBoxLayout,
-        QLabel,
         QPushButton,
-        QSlider,
-        QSpinBox,
         QVBoxLayout,
         QWidget,
     )
@@ -229,382 +367,351 @@ def attach_spinal_straighten(
     save_path = config.sample.save_path.expanduser()
     if data is None:
         data = load_straighten_data(config)
+    rows, cols = data.regvol.shape[:2]
+    arrays = data.arrays()
+
+    state: dict[str, Any] = {"slice": 0, "show_fit": True, "saved": False, "teardown": False}
 
     viewer.dims.ndisplay = 2
-    state = {
-        "slice": 0,
-        "_syncing_layers": False,
-        "show_pred": True,
-        "edit_history": [],
-        "_teardown": False,
-    }
+    camera = viewer.camera
+    camera_before = (camera.mouse_pan, camera.mouse_zoom)
+    camera.mouse_pan = False  # left-drag must not move the image
+    camera.mouse_zoom = False  # the wheel changes slices, it never zooms
 
-    def _stored_point(arr: np.ndarray, slice_idx: int) -> tuple[float, float] | None:
-        if np.isnan(arr[slice_idx, 0]):
-            return None
-        return float(arr[slice_idx, 0]), float(arr[slice_idx, 1])
-
-    def _register_shortcut(key: str, callback) -> None:
-        shortcut = QShortcut(QKeySequence(key), viewer.window._qt_viewer)
-        shortcut.setContext(Qt.ApplicationShortcut)
-        shortcut.activated.connect(callback)
-
-    def _refocus_canvas() -> None:
-        try:
-            qt_viewer = viewer.window._qt_viewer
-        except AttributeError:
-            return
-        canvas_native = getattr(getattr(qt_viewer, "canvas", None), "native", None)
-        for target in (canvas_native, qt_viewer):
-            if target is not None and hasattr(target, "setFocus"):
-                target.setFocus()
-                return
-
+    marker = max(rows, cols) / 70.0
     image_layer = viewer.add_image(
-        data.display_vol,
-        name="cord",
-        colormap="gray",
-        contrast_limits=(0, 1),
+        data.display_vol[:, :, 0], name="cord", colormap="gray", contrast_limits=(0, 255)
     )
-
-    fit_axis_layer = viewer.add_shapes(
-        [],
+    fit_axis = viewer.add_shapes(
+        [np.zeros((2, 2))],
         shape_type="line",
         edge_color="yellow",
-        edge_width=1,
+        edge_width=marker / 6,
         name="fit axis",
     )
-    fit_cen_layer = viewer.add_points(
+    fit_cen = viewer.add_points(
         np.zeros((0, 2)),
         name="fit center",
         face_color="cyan",
-        symbol="+",
-        size=POINT_MARKER_SIZE,
-        ndim=2,
+        border_color="cyan",
+        symbol="cross",
+        size=marker * 0.8,
     )
-    fit_ant_layer = viewer.add_points(
+    fit_ant = viewer.add_points(
         np.zeros((0, 2)),
         name="fit anterior",
-        face_color="green",
+        face_color="transparent",
+        border_color="lime",
+        border_width=0.2,
         symbol="square",
-        size=POINT_MARKER_SIZE,
-        ndim=2,
+        size=marker * 0.5,
     )
-    fit_pos_layer = viewer.add_points(
+    fit_pos = viewer.add_points(
         np.zeros((0, 2)),
         name="fit posterior",
-        face_color="red",
+        face_color="transparent",
+        border_color="red",
+        border_width=0.2,
         symbol="square",
-        size=POINT_MARKER_SIZE,
-        ndim=2,
+        size=marker * 0.5,
     )
-    fit_layers = (fit_axis_layer, fit_cen_layer, fit_ant_layer, fit_pos_layer)
-    for layer in fit_layers:
-        layer.editable = False
-
-    cen_layer = viewer.add_points(
-        np.zeros((0, 2)),
-        name="center",
-        face_color="blue",
-        size=POINT_MARKER_SIZE,
-        ndim=2,
-    )
-    ant_layer = viewer.add_points(
-        np.zeros((0, 2)),
-        name="anterior",
-        face_color="green",
-        size=POINT_MARKER_SIZE,
-        ndim=2,
-    )
-    pos_layer = viewer.add_points(
-        np.zeros((0, 2)),
-        name="posterior",
-        face_color="red",
-        size=POINT_MARKER_SIZE,
-        ndim=2,
-    )
-    point_layers = (cen_layer, ant_layer, pos_layer)
-    layer_kind = {
-        cen_layer: "cen",
-        ant_layer: "ant",
-        pos_layer: "pos",
+    user_layers = {
+        "cen": viewer.add_points(
+            np.zeros((0, 2)),
+            name="center (middle click)",
+            face_color="blue",
+            border_color="blue",
+            size=marker,
+        ),
+        "ant": viewer.add_points(
+            np.zeros((0, 2)),
+            name="anterior (left click)",
+            face_color="lime",
+            border_color="lime",
+            size=marker,
+        ),
+        "pos": viewer.add_points(
+            np.zeros((0, 2)),
+            name="posterior (right click)",
+            face_color="red",
+            border_color="red",
+            size=marker,
+        ),
     }
+    fit_layers = (fit_axis, fit_cen, fit_ant, fit_pos)
+    added_layers = (image_layer, *fit_layers, *user_layers.values())
+    for layer in (*fit_layers, *user_layers.values()):
+        layer.editable = False
+    # napari's camera follows the *active layer's* pan/zoom flags, so set them per layer
+    for layer in added_layers:
+        layer.mouse_pan = False
+        layer.mouse_zoom = False
+    viewer.layers.selection.active = image_layer
+    camera.mouse_pan = False
+    camera.mouse_zoom = False
+    viewer.reset_view()
+    state["min_zoom"] = camera.zoom
 
-    def _point_to_layer(row: float, col: float) -> np.ndarray:
-        """Map stored 1-based MATLAB-style (x=col, y=row) to napari (row, col)."""
-        return np.array([[row, col]], dtype=float)
+    # MATLAB has no layer list: hide napari's layer docks while this stage is open
+    hidden_docks = []
+    qt_viewer = getattr(viewer.window, "_qt_viewer", None)
+    for name in ("dockLayerList", "dockLayerControls"):
+        dock = getattr(qt_viewer, name, None)
+        if dock is not None and dock.isVisible():
+            dock.setVisible(False)
+            hidden_docks.append(dock)
 
-    def current_slice_points() -> None:
-        state["_syncing_layers"] = True
-        try:
-            s = state["slice"]
-            for layer, arr in (
-                (cen_layer, data.user_cen),
-                (ant_layer, data.user_ant),
-                (pos_layer, data.user_pos),
-            ):
-                pt = arr[s]
-                with layer.events.data.blocker():
-                    if np.isnan(pt[0]):
-                        layer.data = np.zeros((0, 2))
-                    else:
-                        layer.data = _point_to_layer(pt[1], pt[0])
-        finally:
-            state["_syncing_layers"] = False
+    overlay = viewer.text_overlay
+    overlay_before = (
+        overlay.visible,
+        overlay.text,
+        overlay.position,
+        overlay.font_size,
+        overlay.color,
+    )
+    overlay.visible = True
+    overlay.position = "top_center"
+    overlay.font_size = 10
 
-    def _active_point_layer_name() -> str:
-        active = viewer.layers.selection.active
-        if active in point_layers:
-            return str(active.name)
-        return "—"
+    plots = _SidePlots(data, on_pick_slice=lambda idx: show_slice(idx))
 
-    def _store_from_layer(layer, arr: np.ndarray) -> None:
-        if state["_syncing_layers"]:
+    # ---------------------------------------------------------------- drawing
+    def update_title() -> None:
+        if state["teardown"]:
             return
+        n_c, n_a, n_p = (int(np.sum(~np.isnan(arrays[k][:, 0]))) for k in POINT_KINDS)
+        flags = "" if state["show_fit"] else " [FIT HIDDEN]"
+        if state["saved"]:
+            flags += " [SAVED]"
+        overlay.text = (
+            f"Slice: {state['slice'] + 1}/{data.n_slices} | Clicks: C={n_c} A={n_a} P={n_p} | "
+            f"Regul.: Pos={data.lambda_pos:.0f} Ang={data.lambda_ang:.0f}{flags}\n{KEY_HELP}"
+        )
+        overlay.color = "lime" if state["saved"] else "white"
+
+    def update_overlay() -> None:
         s = state["slice"]
-        before = _stored_point(arr, s)
-        pts = np.asarray(layer.data, dtype=float)
-        if pts.size == 0:
-            arr[s] = [np.nan, np.nan]
-        else:
-            if pts.ndim == 1:
-                row, col = float(pts[0]), float(pts[1])
-            else:
-                row, col = float(pts[-1, 0]), float(pts[-1, 1])
-            arr[s] = [col + 1.0, row + 1.0]
-            if pts.shape[0] > 1:
-                with layer.events.data.blocker():
-                    layer.data = np.array([[row, col]], dtype=float)
-        after = _stored_point(arr, s)
-        if before != after:
-            state["edit_history"].append((s, layer_kind[layer], before))
-        refresh_fit()
-        update_status()
-
-    def refresh_fit() -> None:
-        data.fit = run_straightening_optimizer(
-            data.user_cen,
-            data.user_ant,
-            data.user_pos,
-            lambda_pos=data.lambda_pos,
-            lambda_ang=data.lambda_ang,
-        )
-        update_fit_overlay()
-
-    def update_fit_overlay() -> None:
-        geom = fit_overlay_geometry(data.fit, state["slice"])
-        show = state["show_pred"] and geom is not None
+        for kind, layer in user_layers.items():
+            pt = arrays[kind][s]
+            # stored [x, y] 1-based -> napari (row, col) 0-based
+            layer.data = (
+                np.zeros((0, 2)) if np.isnan(pt[0]) else np.array([[pt[1] - 1.0, pt[0] - 1.0]])
+            )
+        geom = fit_overlay_geometry(data.fit, s) if state["show_fit"] else None
         for layer in fit_layers:
-            layer.visible = show
-        if not show or geom is None:
-            fit_cen_layer.data = np.zeros((0, 2))
-            fit_ant_layer.data = np.zeros((0, 2))
-            fit_pos_layer.data = np.zeros((0, 2))
-            fit_axis_layer.data = []
-            return
-        fit_cen_layer.data = geom["center"]
-        fit_ant_layer.data = geom["anterior"]
-        fit_pos_layer.data = geom["posterior"]
-        fit_axis_layer.data = [geom["axis"]]
-
-    status_label = QLabel()
-
-    def _click_counts() -> tuple[int, int, int]:
-        n_cen = int(np.sum(~np.isnan(data.user_cen[:, 0])))
-        n_ant = int(np.sum(~np.isnan(data.user_ant[:, 0])))
-        n_pos = int(np.sum(~np.isnan(data.user_pos[:, 0])))
-        return n_cen, n_ant, n_pos
-
-    def update_status() -> None:
-        if state.get("_teardown"):
-            return
-        n_cen, n_ant, n_pos = _click_counts()
-        hidden = "" if state["show_pred"] else " [fit hidden]"
-        viewer.status = (
-            f"Slice {state['slice'] + 1}/{data.n_slices} | "
-            f"layer={_active_point_layer_name()} | clicks C={n_cen} A={n_ant} P={n_pos}{hidden} | "
-            "select a point layer and click; Save/Toggle fit/Clear buttons or S/P keys"
-        )
-        try:
-            status_label.setText(viewer.status)
-        except RuntimeError:
-            return
-
-    def clear_all_points() -> None:
-        clear_all_alignment_points(data.user_cen, data.user_ant, data.user_pos)
-        state["edit_history"].clear()
-        refresh_fit()
-        current_slice_points()
-        update_fit_overlay()
-        update_status()
-
-    def clear_last_point() -> None:
-        slice_idx = pop_last_alignment_edit(
-            state["edit_history"],
-            data.user_cen,
-            data.user_ant,
-            data.user_pos,
-        )
-        if slice_idx is None:
-            show_info("No points to remove.")
-            return
-        refresh_fit()
-        show_slice(slice_idx)
-        _refocus_canvas()
-
-    def toggle_fit_preview() -> None:
-        state["show_pred"] = not state["show_pred"]
-        update_fit_overlay()
-        update_status()
+            layer.visible = geom is not None
+        if geom is not None:
+            one = np.array([[1.0, 1.0]])
+            fit_cen.data = geom["center"] - one
+            fit_ant.data = geom["anterior"] - one
+            fit_pos.data = geom["posterior"] - one
+            fit_axis.data = [geom["axis"] - one]
 
     def show_slice(index: int) -> None:
-        if state.get("_teardown"):
+        if state["teardown"]:
             return
         state["slice"] = int(np.clip(index, 0, data.n_slices - 1))
         image_layer.data = data.display_vol[:, :, state["slice"]]
-        current_slice_points()
-        update_fit_overlay()
-        sync_nav_widgets()
-        update_status()
+        update_overlay()
+        plots.update_cursor(state["slice"])
+        update_title()
 
-    slice_spin = QSpinBox()
-    slice_spin.setRange(1, data.n_slices)
-    slice_spin.setAccelerated(True)
-    slice_spin.setToolTip("Jump to slice (1-based)")
+    def points_changed() -> None:
+        state["saved"] = False
+        data.refit()
+        plots.update_fit()
+        update_overlay()
+        plots.update_cursor(state["slice"])
+        update_title()
 
-    slice_slider = QSlider(Qt.Horizontal)
-    slice_slider.setRange(1, data.n_slices)
-    slice_slider.setPageStep(max(1, data.n_slices // 20))
-    slice_slider.setToolTip("Drag to scroll through slices")
-
-    def sync_nav_widgets() -> None:
-        if state.get("_teardown"):
+    # ---------------------------------------------------------------- mouse
+    def on_mouse_press(_viewer, event) -> None:
+        if state["teardown"] or event.type != "mouse_press":
             return
-        one_based = state["slice"] + 1
-        try:
-            for widget in (slice_spin, slice_slider):
-                widget.blockSignals(True)
-            slice_spin.setValue(one_based)
-            slice_slider.setValue(one_based)
-        except RuntimeError:
+        kind = {1: "ant", 2: "pos", 3: "cen"}.get(int(event.button))
+        if kind is None:
             return
-        finally:
-            try:
-                for widget in (slice_spin, slice_slider):
-                    widget.blockSignals(False)
-            except RuntimeError:
-                pass
-
-    def on_nav_widget_changed(value: int) -> None:
-        show_slice(int(value) - 1)
-
-    slice_spin.valueChanged.connect(on_nav_widget_changed)
-    slice_slider.valueChanged.connect(on_nav_widget_changed)
-
-    def _compact_font() -> QFont:
-        font = QFont()
-        font.setPointSize(9)
-        return font
-
-    controls = QWidget()
-    layout = QVBoxLayout()
-    layout.setContentsMargins(6, 6, 6, 6)
-    layout.setSpacing(4)
-    action_row = QHBoxLayout()
-    save_btn = QPushButton("Save & Close (s)")
-    fit_btn = QPushButton("Toggle fit (p)")
-    clear_last_btn = QPushButton("Clear last")
-    clear_all_btn = QPushButton("Clear all")
-    slice_label = QLabel("Slice")
-
-    compact = _compact_font()
-    for widget in (
-        save_btn,
-        fit_btn,
-        clear_last_btn,
-        clear_all_btn,
-        slice_label,
-        slice_spin,
-        status_label,
-    ):
-        widget.setFont(compact)
-
-    def do_save() -> None:
-        path = save_alignment_checkpoint(data, save_path)
-        console.print(f"[green]Saved[/green] {path}")
-        show_info(f"Saved {path}")
-        QTimer.singleShot(0, lambda: close_stage_or_viewer(viewer))
-
-    save_btn.clicked.connect(do_save)
-    fit_btn.clicked.connect(toggle_fit_preview)
-    clear_last_btn.clicked.connect(clear_last_point)
-    clear_all_btn.clicked.connect(clear_all_points)
-    action_row.addWidget(save_btn)
-    action_row.addWidget(fit_btn)
-    action_row.addWidget(clear_last_btn)
-    action_row.addWidget(clear_all_btn)
-
-    slice_row = QHBoxLayout()
-    slice_row.addWidget(slice_label)
-    slice_row.addWidget(slice_spin)
-    slice_row.addWidget(slice_slider, stretch=1)
-
-    layout.addLayout(action_row)
-    layout.addLayout(slice_row)
-    status_label.setWordWrap(True)
-    layout.addWidget(status_label)
-    controls.setLayout(layout)
-
-    cen_layer.events.data.connect(lambda _event=None: _store_from_layer(cen_layer, data.user_cen))
-    ant_layer.events.data.connect(lambda _event=None: _store_from_layer(ant_layer, data.user_ant))
-    pos_layer.events.data.connect(lambda _event=None: _store_from_layer(pos_layer, data.user_pos))
-
-    @viewer.layers.selection.events.active.connect
-    def _on_active_layer_changed(_event=None) -> None:
-        update_status()
-
-    def _previous_slice_key(_viewer) -> None:
-        show_slice(state["slice"] - 1)
-
-    def _next_slice_key(_viewer) -> None:
-        show_slice(state["slice"] + 1)
-
-    _register_shortcut("S", do_save)
-    _register_shortcut("P", toggle_fit_preview)
-    viewer.bind_key("s", lambda _v: do_save(), overwrite=True)
-    viewer.bind_key("p", lambda _v: toggle_fit_preview(), overwrite=True)
-
-    viewer.bind_key("Left", _previous_slice_key, overwrite=True)
-    viewer.bind_key("Right", _next_slice_key, overwrite=True)
-    viewer.bind_key("PageUp", _next_slice_key, overwrite=True)
-    viewer.bind_key("PageDown", _previous_slice_key, overwrite=True)
-
-    @viewer.window._qt_viewer.canvas.events.mouse_wheel.connect
-    def _scroll_slice(event) -> None:
-        if state.get("_teardown"):
+        row, col = (float(v) for v in event.position[-2:])
+        if not (-0.5 <= row <= rows - 0.5 and -0.5 <= col <= cols - 0.5):
             return
-        if getattr(event, "delta", None) is None:
+        arrays[kind][state["slice"]] = [col + 1.0, row + 1.0]
+        points_changed()
+
+    def on_mouse_wheel(_viewer, event) -> None:
+        if state["teardown"]:
             return
-        dy = event.delta[1] if len(event.delta) > 1 else event.delta[0]
+        delta = getattr(event, "delta", None)
+        if delta is None:
+            return
+        dy = float(delta[1]) if len(delta) > 1 else float(delta[0])
         if dy == 0:
             return
-        step = 1 if dy < 0 else -1
-        show_slice(state["slice"] + step)
+        event.handled = True
+        if "Control" in getattr(event, "modifiers", ()):
+            zoom_at(event.position[-2:], ZOOM_STEP if dy > 0 else 1.0 / ZOOM_STEP)
+            return
+        show_slice(state["slice"] + (1 if dy < 0 else -1))  # wheel down = next slice (MATLAB)
 
-    def _teardown() -> None:
-        state["_teardown"] = True
-        try:
-            viewer.window._qt_viewer.canvas.events.mouse_wheel.disconnect(_scroll_slice)
-        except (AttributeError, RuntimeError, TypeError, ValueError):
-            pass
+    def zoom_at(position, factor: float) -> None:
+        """Zoom by ``factor`` keeping the image point under the cursor fixed."""
+        new_zoom = float(np.clip(camera.zoom * factor, state["min_zoom"], state["min_zoom"] * 40))
+        factor = new_zoom / camera.zoom
+        cursor = np.asarray(position, dtype=float)
+        center = np.asarray(camera.center, dtype=float)
+        center[-2:] = cursor + (center[-2:] - cursor) / factor
+        camera.zoom = new_zoom
+        camera.center = tuple(center)
 
-    out = save_path / "spinal_alignment_opt.json"
+    def reset_zoom() -> None:
+        viewer.reset_view()
+        state["min_zoom"] = camera.zoom
+
+    viewer.mouse_drag_callbacks.append(on_mouse_press)
+    viewer.mouse_wheel_callbacks.append(on_mouse_wheel)
+    # napari zooms on double-click with no easy way back; Ctrl+scroll and 'r' replace it
+    removed_double_click = [
+        cb
+        for cb in list(viewer.mouse_double_click_callbacks)
+        if getattr(cb, "__name__", "") == "double_click_to_zoom"
+    ]
+    for cb in removed_double_click:
+        viewer.mouse_double_click_callbacks.remove(cb)
+
+    # ---------------------------------------------------------------- keys
+    def clear_slice() -> None:
+        s = state["slice"]
+        for kind in POINT_KINDS:
+            arrays[kind][s] = [np.nan, np.nan]
+        points_changed()
+
+    def delete_nearest() -> None:
+        row, col = (float(v) for v in viewer.cursor.position[-2:])
+        if delete_nearest_point(arrays, state["slice"], (col + 1.0, row + 1.0)) is not None:
+            points_changed()
+
+    def jump_largest_gap() -> None:
+        has = np.zeros(data.n_slices, dtype=bool)
+        for kind in POINT_KINDS:
+            has |= ~np.isnan(arrays[kind][:, 0])
+        show_slice(largest_gap_slice(has, state["slice"]))
+
+    def toggle_fit() -> None:
+        state["show_fit"] = not state["show_fit"]
+        update_overlay()
+        update_title()
+
+    def set_regularisation() -> None:
+        dlg = QDialog(viewer.window._qt_window)
+        dlg.setWindowTitle("Regularization Settings")
+        form = QFormLayout(dlg)
+        boxes = []
+        for label, value in (
+            ("Positional Lambda:", data.lambda_pos),
+            ("Angular Lambda:", data.lambda_ang),
+        ):
+            box = QDoubleSpinBox()
+            box.setDecimals(1)
+            box.setRange(0.0, 1e9)
+            box.setValue(float(value))
+            form.addRow(label, box)
+            boxes.append(box)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec_():
+            data.lambda_pos, data.lambda_ang = boxes[0].value(), boxes[1].value()
+            points_changed()
+
+    def save() -> Path:
+        path = save_alignment_checkpoint(data, save_path)
+        state["saved"] = True
+        update_title()
+        console.print(f"[green]Saved[/green] {path}")
+        show_info(f"Saved {path.name}")
+        return path
+
+    key_actions = {
+        "Left": lambda: show_slice(state["slice"] - 1),
+        "Right": lambda: show_slice(state["slice"] + 1),
+        "PageUp": lambda: show_slice(state["slice"] - 10),
+        "PageDown": lambda: show_slice(state["slice"] + 10),
+        "c": clear_slice,
+        "x": delete_nearest,
+        "Space": jump_largest_gap,
+        "l": set_regularisation,
+        "p": toggle_fit,
+        "s": save,
+        "r": reset_zoom,
+        "Home": reset_zoom,
+    }
+    previous_bindings = {}
+    for key, action in key_actions.items():
+        previous_bindings[key] = viewer.bind_key(key, lambda _v, _a=action: _a(), overwrite=True)
+        # The active layer's keymap is checked before the viewer's, and napari's Image layer
+        # binds C (auto-contrast) and X (plane orientation); bind on the layer so ours win.
+        image_layer.bind_key(key, lambda _layer, _a=action: _a(), overwrite=True)
+
+    # ---------------------------------------------------------------- dock
+    panel = QWidget()
+    vbox = QVBoxLayout(panel)
+    vbox.setContentsMargins(4, 4, 4, 4)
+    vbox.addWidget(plots.canvas, stretch=1)
+    row_buttons = QHBoxLayout()
+    save_btn = QPushButton("Save (s)")
+    close_btn = QPushButton("Save && close")
+    save_btn.clicked.connect(save)
+
+    def save_and_close() -> None:
+        save()
+        from qtpy.QtCore import QTimer
+
+        QTimer.singleShot(0, lambda: close_stage_or_viewer(viewer))
+
+    close_btn.clicked.connect(save_and_close)
+    row_buttons.addWidget(save_btn)
+    row_buttons.addWidget(close_btn)
+    vbox.addLayout(row_buttons)
+    panel.setMinimumWidth(380)
+
+    def refresh() -> None:
+        plots.update_fit()
+        show_slice(state["slice"])
+
+    def teardown() -> None:
+        state["teardown"] = True
+        for cb_list, cb in (
+            (viewer.mouse_drag_callbacks, on_mouse_press),
+            (viewer.mouse_wheel_callbacks, on_mouse_wheel),
+        ):
+            if cb in cb_list:
+                cb_list.remove(cb)
+        for key, previous in previous_bindings.items():
+            try:
+                viewer.bind_key(key, previous, overwrite=True)  # None unbinds
+            except (KeyError, TypeError, ValueError):
+                pass
+        camera.mouse_pan, camera.mouse_zoom = camera_before
+        for cb in removed_double_click:
+            if cb not in viewer.mouse_double_click_callbacks:
+                viewer.mouse_double_click_callbacks.append(cb)
+        for dock in hidden_docks:
+            try:
+                dock.setVisible(True)
+            except RuntimeError:
+                pass
+        (overlay.visible, overlay.text, overlay.position, overlay.font_size, overlay.color) = (
+            overlay_before
+        )
+        for layer in added_layers:
+            if layer in viewer.layers:
+                viewer.layers.remove(layer)
 
     return DockStageController(
-        dock_widgets=[(controls, "Controls")],
-        _refresh_fn=lambda: show_slice(0),
-        _teardown_fn=_teardown,
-        result=out,
+        dock_widgets=[(panel, "Centerline fit")],
+        _refresh_fn=refresh,
+        _teardown_fn=teardown,
+        result=save_path / "spinal_alignment_opt.json",
     )
 
 
@@ -623,9 +730,8 @@ def run_spinal_straighten(
     def _attach(viewer: Any) -> DockStageController:
         return attach_spinal_straighten(viewer, config, data=data)
 
-    run_attached_stage("Spinal cord straightening", _attach)
+    run_attached_stage("Spinal Cord Optimizer", _attach)
     out = save_path / "spinal_alignment_opt.json"
     if not out.is_file():
-        msg = f"Straightening closed without saving; expected {out}"
-        console.print(f"[yellow]{msg}[/yellow]")
+        console.print(f"[yellow]Straightening closed without saving; expected {out}[/yellow]")
     return out

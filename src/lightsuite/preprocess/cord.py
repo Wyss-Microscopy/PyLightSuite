@@ -36,6 +36,32 @@ def _robust_std(values: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(values - np.median(values))))
 
 
+def matlab_imbinarize(volume: np.ndarray) -> np.ndarray:
+    """Global Otsu threshold matching MATLAB ``imbinarize`` on an integer volume.
+
+    MATLAB's ``graythresh`` builds a 256-bin histogram over the full range of the
+    integer class (0-65535 for uint16), not over the data range, so the threshold
+    lands on a bin edge of that grid.
+    """
+    vol = np.asarray(volume)
+    if np.issubdtype(vol.dtype, np.integer):
+        top = float(np.iinfo(vol.dtype).max)
+    else:
+        top = 1.0
+    # imhist: 256 bins *centred* on k * top / 255, so the edges sit half a bin out
+    half = 0.5 * top / 255.0
+    hist, _ = np.histogram(vol, bins=256, range=(-half, top + half))
+    p = hist.astype(np.float64) / max(hist.sum(), 1)
+    omega = np.cumsum(p)
+    mu = np.cumsum(p * np.arange(256))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sigma_b = (mu[-1] * omega - mu) ** 2 / (omega * (1.0 - omega))
+    if not np.any(np.isfinite(sigma_b)):
+        return vol > 0
+    level = float(np.nanargmax(sigma_b)) / 255.0
+    return vol > level * top
+
+
 def _brain_trim_range(ihigh: np.ndarray, tofliprc: bool, nz: int) -> list[int]:
     """Determine rostrocaudal slice range after removing brain-stem tissue."""
     ikeep = [1, nz]
@@ -178,7 +204,9 @@ def preprocess_spinal_cord_sample(
     backval = int(np.bincount(samps[samps > 0].astype(np.int64)).argmax()) if np.any(samps > 0) else 0
     regvol_filled = regvol.copy()
     regvol_filled[regvol_filled == 0] = backval
-    binvol = regvol_filled > 0
+    # MATLAB: binvol = imbinarize(regvol) (Otsu). A plain "> 0" after filling the zeros
+    # marks the whole volume as cord, so nothing would be cropped or trimmed.
+    binvol = matlab_imbinarize(regvol_filled)
     binvol = dilation(binvol, footprint=np.ones((3, 3, 3), dtype=bool))
     labeled = label(binvol, connectivity=2)
     if labeled.max() == 0:

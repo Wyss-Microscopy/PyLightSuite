@@ -98,10 +98,15 @@ def _warp_slice_2d(
 ) -> np.ndarray:
     """Apply per-slice rigid transform matching MATLAB ``imwarp`` + ``imref2d``.
 
-    ``tform`` maps input (x, y) = (column, row) to output (x, y). ``affine_transform``
-    indexes (row, column), so swap axes when building the inverse resampling matrix.
+    ``tform`` maps input (x, y) = (column, row) to output (x, y) in MATLAB's 1-based
+    intrinsic coordinates (the convention of the centerline clicks, the fits and
+    :func:`transform_cord_points_slices`). It is converted to 0-based array indices
+    here, so straightened images and straightened points stay on the same grid.
+    ``affine_transform`` indexes (row, column), so axes are swapped as well.
     """
-    inv = np.linalg.inv(tform)
+    to_one = np.array([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 0.0, 1.0]])
+    tform0 = np.linalg.inv(to_one) @ np.asarray(tform, dtype=float) @ to_one
+    inv = np.linalg.inv(tform0)
     m_xy = inv[:2, :2]
     b_xy = inv[:2, 2]
     swap_rc_xy = np.array([[0.0, 1.0], [1.0, 0.0]])

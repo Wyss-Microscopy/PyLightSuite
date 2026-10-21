@@ -33,23 +33,42 @@ def _parse_children_ids(value: object) -> list[int]:
     return [int(token) for token in re.findall(r"\d+", text)]
 
 
+def _children_map(regions_df: pd.DataFrame) -> dict[int, list[int]]:
+    """Direct children of every region, from ``parent_ID`` and ``children_IDs``."""
+    children: dict[int, set[int]] = {}
+    if "parent_ID" in regions_df.columns:
+        for rid, parent in zip(regions_df["id"], regions_df["parent_ID"], strict=True):
+            if pd.isna(parent):
+                continue
+            children.setdefault(int(parent), set()).add(int(rid))
+    if "children_IDs" in regions_df.columns:
+        # first row per id, as ``regions_df.loc[id == parent, "children_IDs"].iloc[0]``
+        first = regions_df.drop_duplicates(subset="id", keep="first")
+        for rid, value in zip(first["id"], first["children_IDs"], strict=True):
+            children.setdefault(int(rid), set()).update(_parse_children_ids(value))
+    return {key: sorted(vals) for key, vals in children.items()}
+
+
+def _descendants_from_map(
+    parent_id: int,
+    children: dict[int, list[int]],
+    cache: dict[int, list[int]],
+) -> list[int]:
+    parent_id = int(parent_id)
+    if parent_id in cache:
+        return cache[parent_id]
+    cache[parent_id] = []  # guards against cycles in malformed tables
+    descendants: set[int] = set()
+    for child_id in children.get(parent_id, []):
+        descendants.add(child_id)
+        descendants.update(_descendants_from_map(child_id, children, cache))
+    cache[parent_id] = sorted(descendants)
+    return cache[parent_id]
+
+
 def get_descendants(parent_id: int, regions_df: pd.DataFrame) -> list[int]:
     """Return all descendant atlas ids for ``parent_id`` (recursive, MATLAB-compatible)."""
-    parent_id = int(parent_id)
-    by_parent = regions_df.groupby("parent_ID")["id"].apply(list).to_dict() if "parent_ID" in regions_df.columns else {}
-
-    direct: list[int] = [int(v) for v in by_parent.get(parent_id, [])]
-    if "children_IDs" in regions_df.columns:
-        row = regions_df.loc[regions_df["id"] == parent_id, "children_IDs"]
-        if not row.empty:
-            direct.extend(_parse_children_ids(row.iloc[0]))
-    direct = sorted(set(direct))
-
-    descendants: list[int] = []
-    for child_id in direct:
-        descendants.append(child_id)
-        descendants.extend(get_descendants(child_id, regions_df))
-    return sorted(set(descendants))
+    return list(_descendants_from_map(parent_id, _children_map(regions_df), {}))
 
 
 def _resolve_target_row(regions_df: pd.DataFrame, target: str) -> pd.Series | None:
@@ -63,42 +82,57 @@ def _resolve_target_row(regions_df: pd.DataFrame, target: str) -> pd.Series | No
     return rows.iloc[0] if not rows.empty else None
 
 
-def resolve_horn_acronym(region_id: int, regions_df: pd.DataFrame) -> str | None:
-    """Return DH, VH, or C by walking ``parent_ID`` ancestors from a finest-level region."""
-    by_id = regions_df.set_index("id", drop=False)
+def _horn_lookup(regions_df: pd.DataFrame) -> dict[int, tuple[str, int]]:
+    """``id -> (acronym, parent_ID)``, keeping the first row per id (like ``.loc``)."""
+    first = regions_df.drop_duplicates(subset="id", keep="first")
+    parents = (
+        first["parent_ID"] if "parent_ID" in first.columns else pd.Series(0, index=first.index)
+    )
+    acronyms = first["acronym"] if "acronym" in first.columns else pd.Series("", index=first.index)
+    out: dict[int, tuple[str, int]] = {}
+    for rid, acronym, parent in zip(first["id"], acronyms, parents, strict=True):
+        out[int(rid)] = (str(acronym), int(parent) if not pd.isna(parent) and parent else 0)
+    return out
+
+
+def _resolve_horn(region_id: int, lookup: dict[int, tuple[str, int]]) -> str | None:
     current = int(region_id)
     visited: set[int] = set()
     while current and current not in visited:
         visited.add(current)
-        if current not in by_id.index:
+        if current not in lookup:
             return None
-        row = by_id.loc[current]
-        acronym = str(row.get("acronym", ""))
+        acronym, parent = lookup[current]
         if acronym in _HORN_ACRONYMS:
             return acronym
-        parent = int(row.get("parent_ID", 0) or 0)
         if parent <= 0 or parent == current:
             break
         current = parent
     return None
 
 
+def resolve_horn_acronym(region_id: int, regions_df: pd.DataFrame) -> str | None:
+    """Return DH, VH, or C by walking ``parent_ID`` ancestors from a finest-level region."""
+    return _resolve_horn(region_id, _horn_lookup(regions_df))
+
+
 def _horn_member_ids(
     region_ids: list[int] | pd.Index,
     regions_df: pd.DataFrame,
     horn_acronym: str,
+    *,
+    lookup: dict[int, tuple[str, int]] | None = None,
 ) -> list[int]:
     """Finest-level region ids assigned exclusively to one horn target."""
+    if lookup is None:
+        lookup = _horn_lookup(regions_df)
     target = str(horn_acronym)
-    members: list[int] = []
-    for region_id in region_ids:
-        assigned = resolve_horn_acronym(int(region_id), regions_df)
-        if assigned == target:
-            members.append(int(region_id))
-    return sorted(members)
+    return sorted(int(rid) for rid in region_ids if _resolve_horn(int(rid), lookup) == target)
 
 
-def resolve_rollup_targets(aggtype: RollupLevel, regions_df: pd.DataFrame) -> list[tuple[int, str, str]]:
+def resolve_rollup_targets(
+    aggtype: RollupLevel, regions_df: pd.DataFrame
+) -> list[tuple[int, str, str]]:
     """Return rollup targets as ``(id, acronym, name)`` tuples."""
     agg = aggtype.lower()
     if agg == "division":
@@ -197,6 +231,20 @@ def rollup_cord_tidy(
     group_cols = ["sample", "channel", "atlas", "hemisphere", "segment"]
     records: list[dict] = []
 
+    # Everything that depends only on the atlas is resolved once, not once per group.
+    is_horn = aggtype.lower() == "horn"
+    horn_lookup = _horn_lookup(regions) if is_horn else {}
+    children = {} if is_horn else _children_map(regions)
+    desc_cache: dict[int, list[int]] = {}
+    target_info = []
+    for target_id, target_acronym, _name in targets:
+        members = (
+            None
+            if is_horn
+            else sorted(set(_descendants_from_map(target_id, children, desc_cache)) | {target_id})
+        )
+        target_info.append((target_acronym, members, _region_metadata_row(regions, target_id)))
+
     for group_key, group_df in work.groupby(group_cols, sort=False):
         if not isinstance(group_key, tuple):
             group_key = (group_key,)
@@ -211,22 +259,23 @@ def rollup_cord_tidy(
         if pivot.empty:
             continue
 
-        volume_series = pivot["volume_mm3"] if "volume_mm3" in pivot.columns else pd.Series(dtype=float)
-        count_series = pivot["cell_count"] if "cell_count" in pivot.columns else pd.Series(dtype=float)
+        volume_series = (
+            pivot["volume_mm3"] if "volume_mm3" in pivot.columns else pd.Series(dtype=float)
+        )
+        count_series = (
+            pivot["cell_count"] if "cell_count" in pivot.columns else pd.Series(dtype=float)
+        )
 
-        for target_id, target_acronym, _name in targets:
-            if aggtype.lower() == "horn":
-                present = _horn_member_ids(pivot.index, regions, target_acronym)
+        for target_acronym, member_ids, meta in target_info:
+            if is_horn:
+                present = _horn_member_ids(pivot.index, regions, target_acronym, lookup=horn_lookup)
             else:
-                member_ids = sorted(set(get_descendants(target_id, regions)) | {target_id})
                 present = [rid for rid in member_ids if rid in pivot.index]
             if not present:
                 continue
 
             subset = pivot.loc[present]
             vol_subset = volume_series.reindex(present).fillna(0.0)
-
-            meta = _region_metadata_row(regions, target_id)
             base = {
                 **group_info,
                 **meta,

@@ -33,7 +33,7 @@ def _parse_elastix_moving_to_fixed_matrix(path: Path) -> np.ndarray:
         raise ValueError(msg)
     params = np.fromstring(match.group(1), sep=" ")
     center = np.fromstring(re.search(pat_center, raw).group(1), sep=" ") if re.search(pat_center, raw) else np.zeros(3)
-    r_mat = params[:9].reshape(3, 3).T
+    r_mat = params[:9].reshape(3, 3)  # elastix stores the matrix row-major
     t_vec = params[9:12]
     t_eff = t_vec + center - (r_mat @ center)
     m_elastix = np.eye(4, dtype=float)

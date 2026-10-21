@@ -614,10 +614,19 @@ def load_registration_volumes(checkpoint) -> np.ndarray:
     if not paths:
         msg = "regopts.json missing regvolpaths; re-run spinal preprocess."
         raise RuntimeError(msg)
+    # Read through the same shape-aware reader as preprocess, so page-per-slice stacks
+    # (e.g. source TIFFs reused as the cache) come back as (Y, X, Z) here too.
+    from lightsuite.io.cord_registration_cache import _read_registration_tiff
+
+    _, expected = cord_volume_downsample_spec(
+        tuple(int(v) for v in checkpoint.orisize),
+        np.asarray(checkpoint.sampleres_um, dtype=float),
+        np.asarray(checkpoint.registrationres_um, dtype=float),
+    )
     channels = sorted((int(k), Path(v)) for k, v in paths.items())
-    first = tifffile.imread(channels[0][1])
+    first = _read_registration_tiff(channels[0][1], expected)
     volume = np.zeros((*first.shape, len(channels)), dtype=np.uint16)
     volume[:, :, :, 0] = first
     for idx, (_, path) in enumerate(channels[1:], start=1):
-        volume[:, :, :, idx] = tifffile.imread(path)
+        volume[:, :, :, idx] = _read_registration_tiff(path, expected)
     return volume
