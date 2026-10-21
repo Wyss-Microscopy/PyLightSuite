@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from lightsuite.registration.elastix.params import write_parameter_file
 
 

@@ -389,3 +389,72 @@ def test_build_gentle_inversion_parameter_file(tmp_path: Path) -> None:
     out = warp_volume_affine(vol, np.eye(4), vol.shape, order=0)
     assert out.shape == vol.shape
     assert np.allclose(out, 1.0)
+
+
+def test_force_no_initial_transform_new_spelling() -> None:
+    """elastix 5.2+ (itk-elastix) writes InitialTransformParameterFileName."""
+    text = '(InitialTransformParameterFileName "/abs/elastix_temp/TransformParameters.0.txt")\n'
+    fixed = _force_no_initial_transform(text)
+    assert fixed == '(InitialTransformParameterFileName "NoInitialTransform")\n'
+
+
+def test_invert_retries_forward_schedule_before_gentle(tmp_path: Path, monkeypatch) -> None:
+    """A diverged inversion is retried with the forward schedule before the gentle one."""
+    import json
+
+    from lightsuite.registration.elastix import backend, invert
+
+    run = tmp_path / "elastix"
+    run.mkdir()
+    (run / "fixed.mhd").write_text("", encoding="utf-8")
+    params = run / "bspline_parameters.txt"
+    params.write_text("(NumberOfResolutions 4)\n(SampleRegionSize 2 2 2)\n", encoding="utf-8")
+    (run / "TransformParameters.0.txt").write_text("(Transform \"BSplineTransform\")\n", encoding="utf-8")
+    (run / backend.CALL_RECORD_NAME).write_text(
+        json.dumps({"fixed": [str(run / "fixed.mhd")], "parameter_files": [str(params)]}),
+        encoding="utf-8",
+    )
+    calls: list[Path] = []
+
+    def fake_attempt(*, output_dir: Path, param_path: Path, **_kwargs) -> Path | None:
+        calls.append(param_path)
+        if len(calls) == 1:
+            return None
+        out = output_dir / "TransformParameters.0.txt"
+        out.write_text('(InitialTransformParameterFileName "x")\n', encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(invert, "_run_inversion_attempt", fake_attempt)
+    result = invert.invert_elastix_transform(run, tmp_path / "inverse")
+    assert calls == [params, params]
+    assert "NoInitialTransform" in result.read_text(encoding="utf-8")
+
+
+def test_invert_removes_stale_gentle_file(tmp_path: Path, monkeypatch) -> None:
+    """A gentle file left by an earlier failed run must not survive a successful run."""
+    import json
+
+    from lightsuite.registration.elastix import backend, invert
+
+    run = tmp_path / "elastix"
+    run.mkdir()
+    (run / "fixed.mhd").write_text("", encoding="utf-8")
+    params = run / "bspline_parameters.txt"
+    params.write_text("(NumberOfResolutions 4)\n", encoding="utf-8")
+    (run / "TransformParameters.0.txt").write_text("(Transform \"BSplineTransform\")\n", encoding="utf-8")
+    (run / backend.CALL_RECORD_NAME).write_text(
+        json.dumps({"fixed": [str(run / "fixed.mhd")], "parameter_files": [str(params)]}),
+        encoding="utf-8",
+    )
+    inverse = tmp_path / "inverse"
+    inverse.mkdir()
+    (inverse / invert.GENTLE_PARAMETER_FILE).write_text("stale", encoding="utf-8")
+
+    def fake_attempt(*, output_dir: Path, **_kwargs) -> Path:
+        out = output_dir / "TransformParameters.0.txt"
+        out.write_text("", encoding="utf-8")
+        return out
+
+    monkeypatch.setattr(invert, "_run_inversion_attempt", fake_attempt)
+    invert.invert_elastix_transform(run, inverse)
+    assert not (inverse / invert.GENTLE_PARAMETER_FILE).exists()

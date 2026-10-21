@@ -1,6 +1,6 @@
 # Installation
 
-PyLightSuite (the Python port of [LightSuite](https://github.com/dimokaramanlis/LightSuite)) is installed from this repository with [`uv`](https://docs.astral.sh/uv/). You also need **Elastix 5.1.0** on your system `PATH` and atlas files for registration. **BCPD** is recommended for the brain coarse alignment.
+PyLightSuite (the Python port of [LightSuite](https://github.com/dimokaramanlis/LightSuite)) is installed from this repository with [`uv`](https://docs.astral.sh/uv/). You also need atlas files for registration. Elastix comes with the Python dependencies ([`itk-elastix`](https://github.com/InsightSoftwareConsortium/ITKElastix)); there is nothing separate to install. **BCPD** is recommended for the brain coarse alignment.
 
 ## Requirements
 
@@ -8,7 +8,7 @@ PyLightSuite (the Python port of [LightSuite](https://github.com/dimokaramanlis/
 |-----------|-----------------|
 | Python | 3.11 – 3.12 (3.13 is blocked, see [Troubleshooting](#troubleshooting)) |
 | [uv](https://docs.astral.sh/uv/getting-started/installation/) | Package and environment manager |
-| [Elastix](https://github.com/SuperElastix/elastix/releases/tag/5.1.0) | 5.1.0, with `elastix` and `transformix` on `PATH` |
+| [itk-elastix](https://github.com/InsightSoftwareConsortium/ITKElastix) | 0.25.x (elastix 5.3), installed by `uv sync` |
 | [BCPD](https://github.com/ohirose/bcpd) | Recommended for brain `init-registration` |
 | Atlas files | Allen CCF (10 µm), Perens LSFM (20 µm), a BrainGlobe atlas, or the Fiederling spinal cord atlas |
 | Scratch disk | ≥50 GB free (500 GB+ recommended for large brains) |
@@ -83,49 +83,20 @@ You should see `check-orientation` listed under `lightsuite brain` commands.
 
 ---
 
-## 3. Install Elastix 5.1.0
+## 3. Elastix (no separate install)
 
-PyLightSuite calls `elastix` and `transformix` as subprocesses, as the MATLAB toolbox does.
+Registration uses elastix and transformix through the
+[`itk-elastix`](https://github.com/InsightSoftwareConsortium/ITKElastix) Python package,
+which `uv sync` installs in step 2. You do not need to download Elastix or edit your `PATH`.
+`lightsuite doctor` reports the installed version.
 
-### Download
-
-Get the [5.1.0 release](https://github.com/SuperElastix/elastix/releases/tag/5.1.0) for your platform and unpack to a permanent location (e.g. `~/software/elastix-5.1.0`, `/opt/elastix` or `C:\elastix`).
-
-On **Linux**:
-
-```bash
-mkdir -p ~/software && cd ~/software
-wget https://github.com/SuperElastix/elastix/releases/download/5.1.0/elastix-5.1.0-linux.zip
-unzip elastix-5.1.0-linux.zip -d elastix-5.1.0
-ls elastix-5.1.0/bin      # elastix  transformix
-```
-
-### Add to PATH
-
-**Linux** — add to `~/.bashrc` (Elastix also needs its bundled libraries on `LD_LIBRARY_PATH`):
-
-```bash
-echo 'export PATH="$HOME/software/elastix-5.1.0/bin:$PATH"' >> ~/.bashrc
-echo 'export LD_LIBRARY_PATH="$HOME/software/elastix-5.1.0/lib:$LD_LIBRARY_PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-**macOS** — add to `~/.zshrc`:
-
-```bash
-export PATH="/path/to/elastix/bin:$PATH"
-```
-
-**Windows** — add the folder containing `elastix.exe` and `transformix.exe` to the system PATH.
-
-### Verify
-
-Open a **new** terminal:
-
-```bash
-elastix --version         # elastix version: 5.1.0
-transformix --help
-```
+Elastix runs in a helper process that loads its libraries once per session (about 15 s
+per pipeline stage on the command line, once per session in the GUI). Earlier versions of
+PyLightSuite called the Elastix 5.1.0 binaries; their transform files still load, and
+applying an existing transform (export, point import) gives identical results. New
+registrations differ slightly from 5.1: forward B-splines by a few µm, inverse B-splines
+by more in places (up to a few hundred µm where the inverse is poorly constrained). Re-run
+`register` rather than mixing transforms from the two versions within one sample.
 
 ---
 
@@ -309,7 +280,7 @@ Expected checks:
 | Check | Required |
 |-------|----------|
 | Python 3.11 – 3.12 | Yes |
-| `elastix` / `transformix` on PATH | Yes |
+| `itk-elastix` installed | Yes |
 | BCPD | Recommended (brain) |
 | Atlas files | Yes (for registration) |
 | Scratch free space | Warning if low |
@@ -400,14 +371,13 @@ Raising workers on SmartSPIM brain data does **not** speed up preprocess.
 | `warning: VIRTUAL_ENV=… does not match the project environment path .venv` | Another Python environment is activated in your shell. It is harmless (`uv run` uses this repository's `.venv`). Run `deactivate`, and remove any `source …/activate` line from `~/.bashrc`. |
 | `error: Extra '…' is not defined` | That extra does not exist (for example, the old `registration` extra was removed). Use the extras listed in [step 2](#2-install-python-dependencies). |
 | `pytest` or Napari disappeared after `uv sync` | `uv sync` removes extras you did not list. Rerun with all extras. |
-| `elastix not found` in `doctor` | Elastix is not on `PATH` in the shell where you run `lightsuite`. Check with `which elastix` (`where elastix` on Windows). |
-| `error while loading shared libraries: libANNlib-5.1.so.1` | Add the Elastix `lib/` folder to `LD_LIBRARY_PATH` ([step 3](#3-install-elastix-510)). |
+| `itk-elastix is required ... but is not installed` | The environment is missing the core dependencies. Run `uv sync` in the repository and start `lightsuite` with `uv run lightsuite`. |
 | `init-registration` logs `(ICP fallback)` | BCPD was not found. Install it ([step 4](#4-install-bcpd-recommended-for-init-registration)) and rerun `init-registration`. |
 | Atlas not found | Set `atlas.atlas_dir` in YAML or `LIGHTSUITE_ATLAS_PATH`. Both template and annotation files must exist in that folder. |
 | `lightsuite gui` prints nothing and does not return | This is normal: the command stays busy while the Napari window is open. |
 | Napari fails to launch | Install the `gui` extra. On Linux over SSH, use a desktop session or X forwarding, and check that `QT_QPA_PLATFORM` is not set to `offscreen`. |
 | A command is missing after `git pull` | See [Updating after `git pull`](#updating-after-git-pull). |
-| Elastix integration tests are skipped | Expected when `elastix` is not on `PATH`; install Elastix to run them. |
+| Elastix integration tests are skipped | Expected when `itk-elastix` is not installed; run `uv sync`. |
 
 Recreate the environment with Python 3.12:
 

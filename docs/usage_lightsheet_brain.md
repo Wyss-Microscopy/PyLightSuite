@@ -2,7 +2,7 @@
 
 This guide takes a stitched whole-brain lightsheet volume to atlas-space registered volumes and per-region intensity tables.
 
-Before you start, finish the [installation](installation.md): PyLightSuite with the `gui` extra, Elastix 5.1.0, BCPD, and an Allen, Perens or BrainGlobe atlas. You also need:
+Before you start, finish the [installation](installation.md): PyLightSuite with the `gui` extra, BCPD, and an Allen, Perens or BrainGlobe atlas. You also need:
 
 - the stitched TIFF data (Terastitcher, BigStitcher, SmartSPIM or similar),
 - the native **voxel size** in µm, as `[x, y, z]`,
@@ -356,7 +356,7 @@ registration:
 | `transformPointsToAtlas.m` | `brain import-annotations` |
 | `regopts.mat`, `atlas2histology_tform.mat`, `transform_params.mat` | the same names with `.json` |
 
-The same TIFF layouts, atlas files and Elastix version work in both. MATLAB control-point sessions can be brought over with `uv run lightsuite brain import-matlab-control-points --help`. MATLAB `.mat` checkpoints are otherwise not read: rerun the Python stages.
+The same TIFF layouts and atlas files work in both, and Elastix transform files written by MATLAB still load. MATLAB control-point sessions can be brought over with `uv run lightsuite brain import-matlab-control-points --help`. MATLAB `.mat` checkpoints are otherwise not read: rerun the Python stages.
 
 The B-spline step matches MATLAB's metrics, optimizer, pyramid and iteration counts, with three deliberate differences:
 

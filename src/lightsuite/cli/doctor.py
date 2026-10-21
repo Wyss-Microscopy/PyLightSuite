@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +21,8 @@ from lightsuite.registration.bcpd import find_bcpd_executable
 
 console = Console()
 
-ELASTIX_EXPECTED_VERSION = "5.1.0"
+# itk-elastix minor version the pipelines are validated with.
+ELASTIX_EXPECTED_VERSION = "0.25"
 MIN_PYTHON = (3, 11)
 MIN_SCRATCH_GB = 50.0
 
@@ -76,35 +76,20 @@ def _check_package_install() -> CheckResult:
     return CheckResult("LightSuite package", ok, detail)
 
 
-def _check_elastix_binary(name: str) -> CheckResult:
-    path = shutil.which(name)
-    if path is None:
+def _check_elastix() -> CheckResult:
+    from lightsuite.registration.elastix.backend import elastix_available, elastix_version
+
+    if not elastix_available():
         return CheckResult(
-            f"{name} binary",
+            "itk-elastix",
             False,
-            "Not found on PATH. Install Elastix 5.1.0 and add bin/ to PATH.",
+            "Not installed. Run: uv sync (itk-elastix is a core dependency).",
         )
-
-    try:
-        proc = subprocess.run(
-            [name, "--help"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-    except OSError as exc:
-        return CheckResult(f"{name} binary", False, str(exc))
-
-    if proc.returncode != 0:
-        return CheckResult(f"{name} binary", False, f"Exit code {proc.returncode}")
-
-    first_line = (proc.stdout or proc.stderr).splitlines()[0] if (proc.stdout or proc.stderr) else ""
-    ok = ELASTIX_EXPECTED_VERSION in first_line or "elastix" in first_line.lower()
-    detail = f"{path} — {first_line.strip() or 'help OK'}"
-    if ELASTIX_EXPECTED_VERSION not in first_line:
-        detail += f" (expected version {ELASTIX_EXPECTED_VERSION})"
-    return CheckResult(f"{name} binary", ok, detail, required=True)
+    version = elastix_version() or "unknown version"
+    detail = f"itk-elastix {version}"
+    if not version.startswith(ELASTIX_EXPECTED_VERSION):
+        detail += f" (tested with {ELASTIX_EXPECTED_VERSION}.x; results may differ slightly)"
+    return CheckResult("itk-elastix", True, detail, required=True)
 
 
 def _check_gpu(request_gpu: bool) -> CheckResult:
@@ -328,8 +313,7 @@ def run_doctor(
     report = DoctorReport()
     report.add(_check_python())
     report.add(_check_package_install())
-    report.add(_check_elastix_binary("elastix"))
-    report.add(_check_elastix_binary("transformix"))
+    report.add(_check_elastix())
     report.add(_check_bcpd(config, config_path=config_path))
     if spinal_config is not None:
         report.add(_check_fiederling_atlas(spinal_config))

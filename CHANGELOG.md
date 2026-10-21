@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `lightsuite brain info` / `lightsuite spinal info`.
 - **Docs**: new [output files](docs/outputs.md) page, generated from the same list of outputs.
 
+### Changed
+
+- Elastix and transformix now run through the `itk-elastix` Python package (a core
+  dependency) instead of the Elastix 5.1.0 binaries, so there is no separate Elastix install
+  or `PATH` setup. Elastix runs in a helper process, so the GUI stays responsive during
+  registration and Cancel stops a running registration. The bundled elastix is 5.3:
+  applying existing transforms gives identical results; new registrations differ from 5.1
+  by a few µm (more for inverse B-splines in poorly constrained regions).
+  `lightsuite doctor` checks for `itk-elastix` instead of the binaries.
+- B-spline inversion retries the full schedule once before falling back to the gentle
+  schedule, and no longer reports a gentle fallback left over from an earlier failed run.
+
 ### Fixed
 
 - Docs: brain QC previews are written directly in `qc/`, not in `qc/initial/`, `qc/affine/`

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -59,7 +58,9 @@ from lightsuite.registration.correspondence_affine import (
     append_correspondence_bspline_landmarks,
     apply_slice_correspondence_affine,
 )
+from lightsuite.registration.elastix.backend import require_elastix
 from lightsuite.registration.elastix.invert import (
+    GENTLE_PARAMETER_FILE,
     invert_elastix_transform,
     write_inverted_transform_copy,
 )
@@ -225,9 +226,7 @@ def validate_registration_inputs(
             "registration quality may be poor."
         )
 
-    if shutil.which("elastix") is None or shutil.which("transformix") is None:
-        msg = "elastix and transformix must be on PATH for brain register."
-        raise RuntimeError(msg)
+    require_elastix("brain register")
 
     return checkpoint, session
 
@@ -639,7 +638,7 @@ def run_brain_registration(config: BrainPipelineConfig, *, use_multistep: bool =
     emit_pipeline_message("Register: inverting B-spline transform…")
     inverse_dir = brain_work_dir(save_path, ELASTIX_INVERSE_TEMP)
     inverted = invert_elastix_transform(elastix_temp, inverse_dir)
-    if (inverse_dir / "inversion_parameters_gentle.txt").is_file():
+    if (inverse_dir / GENTLE_PARAMETER_FILE).is_file():
         console.print(
             "[yellow]B-spline inversion:[/yellow] used gentle single-resolution schedule "
             "(full multistep inversion diverged at high resolution)."

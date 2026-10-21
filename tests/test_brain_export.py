@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -47,9 +46,10 @@ def test_write_parcellation_csv(tmp_path: Path) -> None:
     assert "parcellation_index" in text
 
 
-def test_export_requires_transformix(tmp_path: Path) -> None:
-    if shutil.which("transformix") is not None:
-        pytest.skip("transformix is installed; validation-only test")
+def test_export_requires_elastix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from lightsuite.registration.elastix import backend
+
+    monkeypatch.setattr(backend, "elastix_available", lambda: False)
 
     from lightsuite.config.loader import load_config
     import yaml
@@ -108,5 +108,5 @@ def test_export_requires_transformix(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     cfg = load_config(config_path)
-    with pytest.raises(RuntimeError, match="transformix"):
+    with pytest.raises(RuntimeError, match="itk-elastix"):
         export_registered_brain_volumes(cfg)

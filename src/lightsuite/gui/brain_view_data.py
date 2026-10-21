@@ -51,6 +51,7 @@ from lightsuite.registration.brain_paths import (
     iter_brain_import_paths,
     resolve_brain_qc_file,
 )
+from lightsuite.registration.elastix.backend import elastix_available
 from lightsuite.registration.points import volume_indices_to_cloud_xyz
 from lightsuite.registration.register_diagnostics import RegistrationDiagnostics
 from lightsuite.registration.volume import (
@@ -171,9 +172,7 @@ def _discover_brain_view_paths_sample(config: BrainPipelineConfig) -> BrainViewP
 
 def _can_warp_registration_channels_to_atlas(config: BrainPipelineConfig) -> bool:
     """True when registration channels can be warped to atlas space for QC on demand."""
-    import shutil
-
-    if shutil.which("transformix") is None:
+    if not elastix_available():
         return False
     save_path = config.sample.save_path.expanduser()
     if not (save_path / "transform_params.json").is_file():
@@ -393,11 +392,9 @@ def _warp_registration_channels_for_atlas_inspect(
     expected_shape: tuple[int, int, int],
 ) -> dict[int, np.ndarray]:
     """Warp registration-grid channels to atlas space when export TIFFs are absent."""
-    import shutil
-
     from lightsuite.export.atlas_space import transform_volume_to_atlas
 
-    if shutil.which("transformix") is None:
+    if not elastix_available():
         return {}
 
     save_path = config.sample.save_path.expanduser()

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
+from lightsuite.registration.elastix import backend
 from lightsuite.registration.elastix.mhd import read_mhd_spacing
+
+GENTLE_PARAMETER_FILE = "inversion_parameters_gentle.txt"
 
 
 def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None) -> Path:
@@ -17,18 +19,12 @@ def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None
         output_dir = transform_dir.parent / "elastix_inverse_temp"
     output_dir = output_dir.expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
+    # A failed earlier run leaves these behind; callers read the gentle file as
+    # "this run fell back to the gentle schedule".
+    _clear_inversion_workspace(output_dir)
+    (output_dir / GENTLE_PARAMETER_FILE).unlink(missing_ok=True)
 
-    log_path = transform_dir / "elastix.log"
-    if not log_path.is_file():
-        msg = f"Missing elastix.log in {transform_dir}"
-        raise FileNotFoundError(msg)
-
-    log_text = log_path.read_text(encoding="utf-8", errors="replace")
-    fixed_mhd = _parse_fixed_image_path(log_text, transform_dir)
-    param_paths = _parse_parameter_file_paths(log_text, transform_dir)
-    if not param_paths:
-        msg = f"Could not parse parameter file paths from {log_path}"
-        raise RuntimeError(msg)
+    fixed_mhd, param_paths = _forward_run_inputs(transform_dir)
 
     coef_files = sorted(transform_dir.glob("TransformParameters.*.txt"), reverse=True)
     if not coef_files:
@@ -44,19 +40,24 @@ def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None
     )
 
     forward_param = param_paths[0]
-    inverted = _run_inversion_attempt(
-        fixed_mhd=fixed_mhd,
-        output_dir=output_dir,
-        coef_path=coef_files[0],
-        param_path=forward_param,
-        landmark_paths=landmark_paths,
-    )
-    if inverted is not None:
-        return _finalize_inverted_transform(inverted)
+    # Multithreaded elastix sums partial results in a load-dependent order, so a run that
+    # diverges once (seen on a busy machine) usually converges when repeated.
+    for attempt in range(2):
+        if attempt:
+            _clear_inversion_workspace(output_dir)
+        inverted = _run_inversion_attempt(
+            fixed_mhd=fixed_mhd,
+            output_dir=output_dir,
+            coef_path=coef_files[0],
+            param_path=forward_param,
+            landmark_paths=landmark_paths,
+        )
+        if inverted is not None:
+            return _finalize_inverted_transform(inverted)
 
     gentle_param = _build_gentle_inversion_parameter_file(
         forward_param,
-        output_dir / "inversion_parameters_gentle.txt",
+        output_dir / GENTLE_PARAMETER_FILE,
     )
     _clear_inversion_workspace(output_dir)
     inverted = _run_inversion_attempt(
@@ -68,7 +69,8 @@ def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None
     )
     if inverted is None:
         msg = (
-            f"elastix inversion failed with forward and gentle schedules in {output_dir}. "
+            f"elastix inversion failed with the forward (twice) and gentle schedules in "
+            f"{output_dir}. "
             "See elastix.log in that directory."
         )
         raise RuntimeError(msg)
@@ -89,55 +91,49 @@ def _run_inversion_attempt(
     param_path: Path,
     landmark_paths: tuple[Path, Path] | None,
 ) -> Path | None:
-    """Run one inversion attempt; return TransformParameters path or None on failure."""
-    if shutil.which("elastix") is None:
-        msg = "elastix not found on PATH"
-        raise RuntimeError(msg)
+    """Run one inversion attempt; return TransformParameters path or None on failure.
 
+    MATLAB invertElastixTransformCP registers the fixed image to itself (one image for
+    all metrics), starting from the forward transform.
+    """
     _ = read_mhd_spacing(fixed_mhd)
-    cmd = _build_inversion_command(
-        fixed_mhd=fixed_mhd,
-        output_dir=output_dir,
-        coef_path=coef_path,
-        param_path=param_path,
-        landmark_paths=landmark_paths,
-    )
-    (output_dir / "CMD.txt").write_text(" ".join(cmd), encoding="utf-8")
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
+    try:
+        inverted = backend.elastix(
+            fixed=fixed_mhd,
+            moving=fixed_mhd,
+            parameter_files=param_path,
+            output_dir=output_dir,
+            initial_transform=coef_path,
+            fixed_points=landmark_paths[0] if landmark_paths is not None else None,
+            moving_points=landmark_paths[1] if landmark_paths is not None else None,
+        )
+    except backend.ElastixError:
         return None
-    inverted = sorted(output_dir.glob("TransformParameters.*.txt"))
-    if not inverted:
-        return None
-    return inverted[0]
+    return inverted[0] if inverted else None
 
 
-def _build_inversion_command(
-    *,
-    fixed_mhd: Path,
-    output_dir: Path,
-    coef_path: Path,
-    param_path: Path,
-    landmark_paths: tuple[Path, Path] | None,
-) -> list[str]:
-    """MATLAB invertElastixTransformCP uses one fixed=moving image pair for all metrics."""
-    same = str(fixed_mhd)
-    cmd: list[str] = [
-        "elastix",
-        "-f",
-        same,
-        "-m",
-        same,
-        "-out",
-        str(output_dir),
-        "-t0",
-        str(coef_path),
-        "-p",
-        str(param_path),
-    ]
-    if landmark_paths is not None:
-        cmd.extend(["-fp", str(landmark_paths[0]), "-mp", str(landmark_paths[1])])
-    return cmd
+def _forward_run_inputs(transform_dir: Path) -> tuple[Path, list[Path]]:
+    """Fixed image and parameter files of the forward run in *transform_dir*."""
+    record_path = transform_dir / backend.CALL_RECORD_NAME
+    if record_path.is_file():
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        fixed_mhd = Path(record["fixed"][0])
+        param_paths = [Path(p) for p in record["parameter_files"]]
+        if fixed_mhd.is_file() and param_paths and all(p.is_file() for p in param_paths):
+            return fixed_mhd, param_paths
+
+    # Runs made with the elastix binary: its log holds the command line.
+    log_path = transform_dir / "elastix.log"
+    if not log_path.is_file():
+        msg = f"Missing elastix.log in {transform_dir}"
+        raise FileNotFoundError(msg)
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    fixed_mhd = _parse_fixed_image_path(log_text, transform_dir)
+    param_paths = _parse_parameter_file_paths(log_text, transform_dir)
+    if not param_paths:
+        msg = f"Could not parse parameter file paths from {log_path}"
+        raise RuntimeError(msg)
+    return fixed_mhd, param_paths
 
 
 def _build_gentle_inversion_parameter_file(forward_param: Path, destination: Path) -> Path:
@@ -191,6 +187,7 @@ def _clear_inversion_workspace(output_dir: Path) -> None:
         "elastix.log",
         "IterationInfo.*",
         "result.*",
+        backend.CALL_RECORD_NAME,
     ):
         for path in output_dir.glob(pattern):
             if path.is_file():
@@ -199,10 +196,11 @@ def _clear_inversion_workspace(output_dir: Path) -> None:
 
 def _force_no_initial_transform(text: str) -> str:
     """Strip any chained initial transform so the saved file is the pure inverse."""
-    replacement = '(InitialTransformParametersFileName "NoInitialTransform")'
-    pattern = re.compile(r'\(\s*InitialTransformParametersFileName\s+"[^"]*"\s*\)')
+    # elastix 5.1 writes InitialTransformParametersFileName, 5.2+ InitialTransformParameterFileName.
+    pattern = re.compile(r'\(\s*(InitialTransformParameters?FileName)\s+"[^"]*"\s*\)')
     if pattern.search(text):
-        return pattern.sub(replacement, text)
+        return pattern.sub(r'(\1 "NoInitialTransform")', text)
+    replacement = '(InitialTransformParametersFileName "NoInitialTransform")'
     return text.rstrip("\n") + "\n" + replacement + "\n"
 
 

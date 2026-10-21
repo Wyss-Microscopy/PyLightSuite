@@ -1,15 +1,14 @@
-"""Run elastix / transformix via subprocess."""
+"""Run elastix / transformix (through itk-elastix, see ``backend``)."""
 
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from lightsuite.registration.elastix import backend
 from lightsuite.registration.elastix.mhd import (
     _mhd_element_dtype,
     _mhd_header_field,
@@ -61,10 +60,6 @@ def run_bspline_registration(
     bending_energy_weight: float = 0.0,
 ) -> BsplineRegistrationResult:
     """Run single- or dual-channel elastix B-spline registration."""
-    if shutil.which("elastix") is None:
-        msg = "elastix not found on PATH"
-        raise RuntimeError(msg)
-
     output_dir = output_dir.expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     clear_elastix_workspace(output_dir)
@@ -97,6 +92,8 @@ def run_bspline_registration(
     )
 
     sp = [spacing_mm, spacing_mm, spacing_mm]
+    fixed_paths: list[Path] = []
+    moving_paths: list[Path] = []
     if dual:
         # One image pair per metric: AF+atlas, signal+atlas, then AF+atlas duplicates for
         # the landmark and (optional) bending-energy slots, which need valid inputs but
@@ -104,59 +101,29 @@ def run_bspline_registration(
         stem = output_dir.name
         n_metrics = len(params["Metric"])
         fixed_for_metric = [fixed_u16, fixed_secondary_u16] + [fixed_u16] * (n_metrics - 2)
-        cmd = ["elastix"]
         for index in range(n_metrics):
             base_f = output_dir / f"{stem}_dual_f{index}"
             base_m = output_dir / f"{stem}_dual_m{index}"
             write_mhd(fixed_for_metric[index], base_f, sp)
             write_mhd(moving_u16, base_m, sp)
-            cmd += [
-                f"-f{index}",
-                str(base_f.with_suffix(".mhd")),
-                f"-m{index}",
-                str(base_m.with_suffix(".mhd")),
-            ]
-        cmd += [
-            "-out",
-            str(output_dir),
-            "-fp",
-            str(fixpath),
-            "-mp",
-            str(movpath),
-            "-p",
-            str(param_path),
-        ]
+            fixed_paths.append(base_f.with_suffix(".mhd"))
+            moving_paths.append(base_m.with_suffix(".mhd"))
     else:
         fixed_mhd = output_dir / "fixed.mhd"
         moving_mhd = output_dir / "moving.mhd"
         write_mhd(fixed_u16, fixed_mhd.with_suffix(""), sp)
         write_mhd(moving_u16, moving_mhd.with_suffix(""), sp)
-        cmd = [
-            "elastix",
-            "-f",
-            str(fixed_mhd),
-            "-m",
-            str(moving_mhd),
-            "-out",
-            str(output_dir),
-            "-fp",
-            str(fixpath),
-            "-mp",
-            str(movpath),
-            "-p",
-            str(param_path),
-        ]
+        fixed_paths.append(fixed_mhd)
+        moving_paths.append(moving_mhd)
 
-    (output_dir / "CMD.txt").write_text(" ".join(cmd), encoding="utf-8")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        msg = f"elastix failed (exit {result.returncode}):\n{result.stdout}\n{result.stderr}"
-        raise RuntimeError(msg)
-
-    transforms = sorted(output_dir.glob("TransformParameters.*.txt"))
-    if not transforms:
-        msg = f"No TransformParameters.*.txt found in {output_dir}"
-        raise RuntimeError(msg)
+    transforms = backend.elastix(
+        fixed=fixed_paths,
+        moving=moving_paths,
+        parameter_files=[param_path],
+        output_dir=output_dir,
+        fixed_points=fixpath,
+        moving_points=movpath,
+    )
 
     forward_copy = save_path / "bspline_atlas_to_samp_20um.txt"
     forward_copy.write_text(transforms[0].read_text(encoding="utf-8"), encoding="utf-8")
@@ -279,18 +246,6 @@ def _read_transformix_result(result_path: Path):
     return read_mhd_volume(result_path)
 
 
-def _transformix_failure_message(output_dir: Path, proc: subprocess.CompletedProcess) -> str:
-    listing = ", ".join(sorted(p.name for p in output_dir.iterdir())) or "(empty)"
-    stderr_tail = (proc.stderr or "").strip()[-4000:]
-    stdout_tail = (proc.stdout or "").strip()[-2000:]
-    return (
-        f"No transformix result image in {output_dir} (expected result.mhd or result.nii.gz). "
-        f"Directory listing: {listing}. "
-        f"transformix stderr (tail): {stderr_tail or '(empty)'} "
-        f"stdout (tail): {stdout_tail or '(empty)'}"
-    )
-
-
 def run_transformix_deformation_field(
     *,
     transform_path: Path,
@@ -301,10 +256,6 @@ def run_transformix_deformation_field(
     Returns an array with shape (Y, X, Z, 3) in physical mm displacement components
     matching elastix / MetaImage vector layout.
     """
-    if shutil.which("transformix") is None:
-        msg = "transformix not found on PATH"
-        raise RuntimeError(msg)
-
     output_dir = output_dir.expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     for pattern in ("deformationField*", "transformix_params.txt"):
@@ -313,35 +264,16 @@ def run_transformix_deformation_field(
                 path.unlink()
 
     raw_params = transform_path.read_text(encoding="utf-8")
-    params = _upsert_elastix_param(raw_params, "WriteDeformationField", "true")
-    params = _upsert_elastix_param(params, "WriteResultImage", "false")
+    params = _upsert_elastix_param(raw_params, "WriteResultImage", "false")
     temp_param = output_dir / "transformix_def_params.txt"
     temp_param.write_text(params, encoding="utf-8")
 
-    cmd = [
-        "transformix",
-        "-def",
-        "all",
-        "-out",
-        str(output_dir),
-        "-tp",
-        str(temp_param),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        msg = f"transformix -def all failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
-        raise RuntimeError(msg)
-
-    field_path = output_dir / "deformationField.mhd"
-    if not field_path.is_file():
-        hits = sorted(output_dir.glob("deformationField*.mhd"))
-        if not hits:
-            listing = ", ".join(sorted(p.name for p in output_dir.iterdir())) or "(empty)"
-            msg = f"No deformationField.mhd in {output_dir} (listing: {listing})"
-            raise FileNotFoundError(msg)
-        field_path = hits[0]
-
-    return _read_mhd_vector_field(field_path)
+    written = backend.transformix(
+        transform_path=temp_param,
+        output_dir=output_dir,
+        deformation_field=True,
+    )
+    return _read_mhd_vector_field(written["deformation"])
 
 
 def _read_mhd_vector_field(mhd_path: Path) -> np.ndarray:
@@ -400,10 +332,6 @@ def run_transformix_physical_points(
     the index↔physical mapping. Use this when the volumes carry a non-identity
     direction or anisotropic spacing that a scalar spacing cannot express.
     """
-    if shutil.which("transformix") is None:
-        msg = "transformix not found on PATH"
-        raise RuntimeError(msg)
-
     pts = np.asarray(points_xyz, dtype=float)
     if pts.size == 0:
         return pts.reshape(0, 3)
@@ -420,26 +348,12 @@ def run_transformix_physical_points(
 
     input_path = output_dir / "inputPoints.txt"
     write_landmark_file(input_path, pts)
-    cmd = [
-        "transformix",
-        "-def",
-        str(input_path),
-        "-out",
-        str(output_dir),
-        "-tp",
-        str(Path(transform_path).expanduser()),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    (output_dir / "transformix.stdout.txt").write_text(proc.stdout or "", encoding="utf-8")
-    (output_dir / "transformix.stderr.txt").write_text(proc.stderr or "", encoding="utf-8")
-    if proc.returncode != 0:
-        msg = f"transformix -def points failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
-        raise RuntimeError(msg)
-
-    out_path = output_dir / "outputpoints.txt"
-    if not out_path.is_file():
-        msg = f"transformix did not write {out_path}"
-        raise FileNotFoundError(msg)
+    written = backend.transformix(
+        transform_path=Path(transform_path).expanduser(),
+        output_dir=output_dir,
+        points_file=input_path,
+    )
+    out_path = written["points"]
 
     mapped: list[list[float]] = []
     for line in out_path.read_text(encoding="utf-8").splitlines():
@@ -493,10 +407,6 @@ def run_transformix(
     nearest: bool = False,
 ):
     """Apply a transformix transform and load the result volume."""
-    if shutil.which("transformix") is None:
-        msg = "transformix not found on PATH"
-        raise RuntimeError(msg)
-
     output_dir = output_dir.expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     for pattern in ("result*", "Result*", "TransformParameters.*.txt", "transformix_params.txt"):
@@ -520,27 +430,14 @@ def run_transformix(
 
     moving_mhd = output_dir / "moving.mhd"
     write_mhd(moving_volume, moving_mhd.with_suffix(""), [spacing_mm] * 3)
-    cmd = [
-        "transformix",
-        "-in",
-        str(moving_mhd),
-        "-out",
-        str(output_dir),
-        "-tp",
-        str(temp_param),
-    ]
-    (output_dir / "transformix_cmd.txt").write_text(" ".join(cmd), encoding="utf-8")
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    (output_dir / "transformix.stdout.txt").write_text(proc.stdout or "", encoding="utf-8")
-    (output_dir / "transformix.stderr.txt").write_text(proc.stderr or "", encoding="utf-8")
-    if proc.returncode != 0:
-        msg = f"transformix failed (exit {proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
-        raise RuntimeError(msg)
-
-    result_path = _discover_transformix_result(output_dir)
-    if result_path is None:
-        raise RuntimeError(_transformix_failure_message(output_dir, proc))
-    volume = _read_transformix_result(result_path)
+    written = backend.transformix(
+        transform_path=temp_param,
+        output_dir=output_dir,
+        input_image=moving_mhd,
+        # Labels resample in double, as ResultImagePixelType "double" did for the binary.
+        pixel_type="double" if nearest else "float",
+    )
+    volume = _read_transformix_result(written["result"])
     if nearest:
         volume = np.rint(volume).astype(np.float32)
     return volume
