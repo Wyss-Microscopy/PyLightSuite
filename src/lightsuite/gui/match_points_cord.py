@@ -1,47 +1,72 @@
-"""Spinal cord control-point matching GUI (matchControlPointsSpine.m port)."""
+"""Spinal cord control-point GUI (matchControlPoints_unified.m, spine mode).
+
+Same layout, controls and logic as the MATLAB GUI, in one napari canvas:
+
+* top: straightened sample slice (left) and the atlas, pre-warped into the sample
+  grid by the initial affine (right);
+* bottom: maximum projections of sample and atlas along the cord, with the current
+  sample slice (red) and atlas slice (blue) marked.
+
+Controls::
+
+    Click on sample / atlas   add a point (pairs are numbered 1, 2, ... per slice)
+    Backspace                 delete the last added point on this slice
+    c                         clear all points on this slice
+    <- / ->                   previous / next slice
+    Enter                     jump to a slice
+    Space                     show / hide the atlas boundaries on the sample
+    Scroll                    move the atlas plane by 2
+    s                         save
+    Ctrl+scroll, r / Home     zoom / reset the view (not in MATLAB)
+
+Points are stored like MATLAB's ``corresponding_points.mat``: per slice, rows of
+``[row, col, slice, timestamp]``, 1-based, timestamp = MATLAB datenum. Once 16 pairs
+exist, an affine is fitted from atlas to sample points and its warped atlas
+boundaries are drawn on the sample.
+"""
 
 from __future__ import annotations
 
-import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from rich.console import Console
+from scipy import ndimage
 
 from lightsuite.config.models import SpinalCordPipelineConfig
+from lightsuite.gui.affine import fit_affine_transform
+from lightsuite.gui.control_points import COORD_SCHEMA_VERSION, ControlPointSession
 from lightsuite.gui.cord_data import (
-    CORD_ATLAS_PROVIDER,
+    CORD_POINT_COORDS_MATLAB,
+    CordMatchPointsData,
     default_cord_session_path,
     load_cord_match_points_data,
+    matlab_datenum_now,
     prepare_cord_match_points_session,
-    resolve_atlas_plane_index,
-    set_atlas_plane_index,
-    slice_pair,
-)
-from lightsuite.gui.control_points import ControlPointSession, mark_session_saved_from_napari
-from lightsuite.gui.slices import (
-    layer_xy_from_slice_pixels,
-    slice_pixels_from_layer_xy,
-    volume_index_to_image,
 )
 from lightsuite.gui.stage_controller import (
     DockStageController,
-    close_stage_or_viewer,
-    require_magicgui,
+    require_napari,
     run_attached_stage,
 )
-from lightsuite.registration.warp import warp_volume_affine
 
 console = Console()
 
 CORRESPONDING_POINTS_JSON = "corresponding_points.json"
-PANEL_GAP_X = 24
-MIN_AFFINE_PAIRS = 16
-# Cord chooselist always cuts transverse slices along the straightened rostrocaudal axis.
+MIN_AFFINE_PAIRS = 16  # MATLAB Nmin
 CORD_CUT_AXIS = 3
-TEXT_LABEL_COLOR = "white"
-TEXT_LABEL_OFFSET = (0.0, 8.0)
+ATLAS_SCROLL_STEP = 2  # MATLAB: atlas_slice + 2 * VerticalScrollCount
+ATLAS_CLIM = (0.0, 250.0)
+ZOOM_STEP = 1.25
+
+BASE_TITLE = "Control point GUI (SPINE): match points between sample and atlas"
+CONTROLS = (
+    "Controls: ←/→: switch slice | Click: add | Backspace: delete | C: clear | "
+    "Space: overlay | Enter: jump | S: save\n"
+    "Scroll: atlas plane | Ctrl+scroll: zoom | R: reset view"
+)
 
 
 def default_session_path(save_path: Path) -> Path:
@@ -49,565 +74,687 @@ def default_session_path(save_path: Path) -> Path:
     return default_cord_session_path(save_path)
 
 
-def _plot_axes_for_row(chooserow: np.ndarray) -> list[int]:
-    cut_axis = int(chooserow[1]) - 1
-    return [d for d in range(3) if d != cut_axis]
+# --------------------------------------------------------------------------- MATLAB helpers
+def matlab_round(x: float | np.ndarray) -> np.ndarray | int:
+    """MATLAB ``round``: halves away from zero."""
+    arr = np.asarray(x, dtype=float)
+    out = np.sign(arr) * np.floor(np.abs(arr) + 0.5)
+    return int(out) if out.ndim == 0 else out.astype(int)
 
 
-def _raw_slice_shape(volume: np.ndarray, chooserow: np.ndarray) -> tuple[int, int]:
-    return tuple(int(v) for v in volume_index_to_image(volume, chooserow).shape)
+def matlab_uint8(x: np.ndarray) -> np.ndarray:
+    """MATLAB ``uint8()`` of floating values: round half away from zero, saturate.
+
+    float32 input stays float32 (MATLAB does these products in ``single``).
+    """
+    arr = np.asarray(x)
+    if arr.dtype != np.float32:
+        arr = arr.astype(np.float64)
+    out = np.floor(arr + arr.dtype.type(0.5))
+    np.clip(out, 0, 255, out=out)
+    return out.astype(np.uint8)
 
 
-def _volume_points_to_layer_xy(
-    points: list[list[float]],
-    chooserow: np.ndarray,
-    *,
-    slice_shape: tuple[int, int],
-) -> np.ndarray:
-    if not points:
-        return np.zeros((0, 2))
-    pts = np.asarray(points, dtype=float)
-    plot_axes = _plot_axes_for_row(chooserow)
-    cut_axis = int(chooserow[1])
-    return layer_xy_from_slice_pixels(
-        pts[:, plot_axes[0]],
-        pts[:, plot_axes[1]],
-        slice_shape,
-        cut_axis,
-        CORD_ATLAS_PROVIDER,
-    )
+def image_limits(image: np.ndarray, alpha: float = 0.001) -> tuple[float, float]:
+    """MATLAB ``getImageLimits``: quantiles of the non-zero pixels, max >= 5 x min."""
+    vals = np.asarray(image, dtype=np.float64)
+    vals = vals[vals > 0]
+    if vals.size == 0:
+        return 0.0, 255.0
+    lo, hi = np.quantile(vals, [alpha, 1.0 - alpha], method="hazen")  # MATLAB quantile
+    return float(lo), float(max(hi, 5.0 * lo))
 
 
-def _layer_xy_to_volume_point(
-    xy: tuple[float, float],
-    chooserow: np.ndarray,
-    *,
-    slice_shape: tuple[int, int],
-    timestamp: float,
-    plane_along_cut_axis: int | None = None,
-) -> list[float]:
-    plot_axes = _plot_axes_for_row(chooserow)
-    cut_axis = int(chooserow[1]) - 1
-    row, col = slice_pixels_from_layer_xy(
-        np.asarray([xy], dtype=float),
-        slice_shape,
-        int(chooserow[1]),
-        CORD_ATLAS_PROVIDER,
-    )
-    point = np.zeros(4, dtype=float)
-    point[plot_axes[0]] = row[0]
-    point[plot_axes[1]] = col[0]
-    point[cut_axis] = float(
-        plane_along_cut_axis if plane_along_cut_axis is not None else int(chooserow[0])
-    )
-    point[3] = timestamp
-    return point.tolist()
+def clahe_uint8(image: np.ndarray) -> np.ndarray:
+    """``adapthisteq`` defaults (8 x 8 tiles, clip 0.01, 256 bins) via skimage."""
+    from skimage.exposure import equalize_adapthist
+
+    img = np.asarray(image, dtype=np.uint8)
+    if img.max() == img.min():
+        return img.copy()
+    return matlab_uint8(equalize_adapthist(img, clip_limit=0.01, nbins=256) * 255.0)
 
 
-def _configure_point_text(layer) -> None:
-    if not hasattr(layer, "text"):
-        return
-    try:
-        layer.text.color = TEXT_LABEL_COLOR
-        layer.text.translation = np.array(TEXT_LABEL_OFFSET, dtype=float)
-        layer.text.anchor = "center"
-        layer.text.size = 12
-    except (TypeError, ValueError, AttributeError):
-        pass
-
-
-def _slice_point_store(session: ControlPointSession, panel: str) -> list[list[list[float]]]:
-    return (
-        session.histology_control_points
-        if panel == "sample"
-        else session.atlas_control_points
-    )
-
-
-def _sync_store_from_layer(
+def fit_cord_alignment(
     session: ControlPointSession,
-    slice_idx: int,
-    panel: str,
-    layer_xy: np.ndarray,
-    *,
-    slice_shape: tuple[int, int],
-    atlas_plane: int | None = None,
-) -> None:
-    chooserow = np.asarray(session.chooselist[slice_idx - 1], dtype=int)
-    store = _slice_point_store(session, panel)
-    existing = store[slice_idx - 1]
-    plane = atlas_plane if panel == "atlas" else None
-    updated: list[list[float]] = []
-    for i, pt in enumerate(layer_xy):
-        ts = float(existing[i][3]) if i < len(existing) else time.time()
-        updated.append(
-            _layer_xy_to_volume_point(
-                (float(pt[0]), float(pt[1])),
-                chooserow,
-                slice_shape=slice_shape,
-                timestamp=ts,
-                plane_along_cut_axis=plane,
-            )
-        )
-    store[slice_idx - 1] = updated
+    auto_alignment: np.ndarray | None,
+) -> tuple[np.ndarray, str]:
+    """MATLAB ``align_ccf_to_histology``: atlas -> sample affine and the status line.
+
+    Paired slices are those with the same, non-zero number of points on both sides.
+    The matrix acts on 1-based ``[x, y, z, 1]`` column vectors (MATLAB ``tform.A``).
+    """
+    atlas_xyz, hist_xyz = session.paired_points_xyz()
+    n = hist_xyz.shape[0]
+    if n >= MIN_AFFINE_PAIRS and atlas_xyz.shape[0] == n:
+        matrix, mse = fit_affine_transform(atlas_xyz, hist_xyz)
+        return matrix, f"Current Fit: MSE: {mse:.2f} | Npoints: {n}"
+    if auto_alignment is not None:
+        return np.asarray(auto_alignment, dtype=float), "Current Fit: Using initial auto-alignment"
+    return np.eye(4), "Current Fit: Identity/No alignment"
 
 
-def _pair_labels(n_points: int) -> list[str]:
-    return [str(i + 1) for i in range(n_points)]
+def auto_atlas_plane(matrix: np.ndarray, image_shape: tuple[int, int], sample_slice: int) -> int:
+    """Atlas plane matching a sample slice under ``matrix`` (MATLAB ``update_slice``).
+
+    The four corners of the sample slice are mapped into the atlas with the inverse
+    transform; the plane is the rounded middle of their z range, at least 1.
+    """
+    rows, cols = image_shape
+    inv = np.linalg.inv(np.asarray(matrix, dtype=float))
+    corners = np.array(
+        [
+            [1, 1, sample_slice, 1],
+            [cols, 1, sample_slice, 1],
+            [1, rows, sample_slice, 1],
+            [cols, rows, sample_slice, 1],
+        ],
+        dtype=float,
+    )
+    z = (inv @ corners.T)[2]
+    return max(int(matlab_round(0.5 * (z.min() + z.max()))), 1)
 
 
-def _pair_status(n_sample: int, n_atlas: int) -> str:
-    n_pairs = min(n_sample, n_atlas)
-    if n_sample == n_atlas:
-        return f"pairs={n_pairs} (matched)"
-    if n_sample > n_atlas:
-        return f"pairs={n_pairs} | place atlas point #{n_atlas + 1}"
-    return f"pairs={n_pairs} | place sample point #{n_sample + 1}"
+def atlas_plane_for_slice(
+    atlas_points: list[list[float]],
+    matrix: np.ndarray,
+    image_shape: tuple[int, int],
+    sample_slice: int,
+) -> int:
+    """Median plane of this slice's atlas points, else :func:`auto_atlas_plane`."""
+    if atlas_points:
+        return int(matlab_round(np.median([float(p[2]) for p in atlas_points])))
+    return auto_atlas_plane(matrix, image_shape, sample_slice)
 
 
-def _boundary_overlay(
-    warped_annotation: np.ndarray,
-    chooserow: np.ndarray,
+def warped_annotation_plane(
+    annotation: np.ndarray, matrix: np.ndarray, sample_slice: int
 ) -> np.ndarray:
-    from scipy.ndimage import convolve
+    """Plane ``sample_slice`` of the annotation warped by ``matrix`` (nearest neighbour)."""
+    rows, cols, depth = annotation.shape
+    inv = np.linalg.inv(np.asarray(matrix, dtype=float))
+    yy, xx = np.mgrid[1 : rows + 1, 1 : cols + 1].astype(float)
+    hom = np.stack(
+        [xx.ravel(), yy.ravel(), np.full(xx.size, float(sample_slice)), np.ones(xx.size)]
+    )
+    src = inv @ hom
+    ix = np.floor(src[0] + 0.5).astype(np.int64) - 1
+    iy = np.floor(src[1] + 0.5).astype(np.int64) - 1
+    iz = np.floor(src[2] + 0.5).astype(np.int64) - 1
+    ok = (ix >= 0) & (ix < cols) & (iy >= 0) & (iy < rows) & (iz >= 0) & (iz < depth)
+    out = np.zeros(rows * cols, dtype=annotation.dtype)
+    out[ok] = annotation[iy[ok], ix[ok], iz[ok]]
+    return out.reshape(rows, cols)
 
-    from lightsuite.gui.slices import prepare_display_slice
 
-    ann_slice = volume_index_to_image(warped_annotation, chooserow)
-    edges = ann_slice.astype(float)
-    kernel = np.ones((3, 3)) / 9.0
-    blurred = convolve(edges, kernel, mode="constant")
-    overlay = (np.round(blurred) != edges).astype(float)
-    return prepare_display_slice(overlay, int(chooserow[1]), CORD_ATLAS_PROVIDER)
+def boundary_mask(label_slice: np.ndarray) -> np.ndarray:
+    """MATLAB: ``round(conv2(slice, ones(3)/9, 'same')) ~= slice``."""
+    lab = np.asarray(label_slice, dtype=np.float64)
+    mean = ndimage.convolve(lab, np.full((3, 3), 1.0 / 9.0), mode="constant", cval=0.0)
+    return np.floor(mean + 0.5) != lab
 
 
-def _chooselist_slice_label(chooselist: np.ndarray, slice_idx: int) -> str:
-    row = np.asarray(chooselist[slice_idx - 1], dtype=int)
-    return f"sample plane {row[0]} / {row[1]}-axis cut"
+def delete_last_point(hist: list[list[float]], atlas: list[list[float]]) -> bool:
+    """MATLAB Backspace: drop the most recent of the two last points (by timestamp)."""
+    # NaN timestamps (legacy files) compare false, exactly as in MATLAB
+    t_h = float(hist[-1][3]) if hist else -np.inf
+    t_a = float(atlas[-1][3]) if atlas else -np.inf
+    if t_h > t_a:
+        hist.pop()
+        return True
+    if t_a > -np.inf:
+        atlas.pop()
+        return True
+    return False
+
+
+def sample_display_volume(sample: np.ndarray) -> np.ndarray:
+    """MATLAB: ``uint8(volume * 255 / quantile(volume, 0.999, 'all'))``."""
+    vol = np.asarray(sample, dtype=np.float32)
+    q = np.float32(np.quantile(vol, 0.999, method="hazen"))
+    return matlab_uint8(vol * (np.float32(255.0) / max(q, np.float32(1e-12))))
+
+
+def atlas_display_volume(template: np.ndarray, template_max: float | None) -> np.ndarray:
+    """MATLAB: ``uint8(medfilt3(tv) * 255 / max(...))`` (warped into the sample grid)."""
+    vol = np.asarray(template, dtype=np.float32)
+    top = np.float32(template_max) if template_max else np.float32(np.max(vol))
+    return matlab_uint8(vol * (np.float32(255.0) / max(top, np.float32(1e-12))))
+
+
+def save_cord_session(
+    session: ControlPointSession, path: Path, manual_alignment: np.ndarray
+) -> Path:
+    """Write the session like MATLAB ``savedata`` (points, current alignment, ori_trans)."""
+    session.atlas2histology_tform = np.asarray(manual_alignment, dtype=float).tolist()
+    session.coord_schema_version = COORD_SCHEMA_VERSION
+    session.point_coord_source = CORD_POINT_COORDS_MATLAB
+    session.save(path)
+    return path
+
+
+# --------------------------------------------------------------------------- GUI
+@dataclass
+class _Layout:
+    """World coordinates (napari row, col) of the panels in the single canvas."""
+
+    rows: int
+    cols: int
+    nz: int
+    gap: int
+    atlas_col0: float
+    mip_scale: float
+    mip_col0: float
+    mip_row0_sample: float
+    mip_gap_px: int
+    title_row: float = field(default=-6.0)
+
+    @property
+    def mip_row0_atlas(self) -> float:
+        return self.mip_row0_sample + (self.cols + self.mip_gap_px) * self.mip_scale
+
+
+def _layout(rows: int, cols: int, nz: int) -> _Layout:
+    gap = int(max(4, round(0.05 * cols)))
+    total = 2 * cols + gap
+    # MATLAB: projections fill ~70 % of the width in the bottom 20 % of the figure
+    scale = 0.7 * total / nz
+    return _Layout(
+        rows=rows,
+        cols=cols,
+        nz=nz,
+        gap=gap,
+        atlas_col0=float(cols + gap),
+        mip_scale=scale,
+        mip_col0=(total - nz * scale) / 2.0,
+        mip_row0_sample=float(rows + gap),
+        mip_gap_px=int(np.ceil(0.5 * gap / scale)),
+    )
+
+
+def _unit_range(image: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Map ``[lo, hi]`` to ``[0, 1]`` (imagesc with CLim ``[lo hi]``)."""
+    out = (np.asarray(image, dtype=np.float32) - np.float32(lo)) / np.float32(max(hi - lo, 1e-12))
+    return np.clip(out, 0.0, 1.0)
 
 
 def attach_spinal_match_points(
     viewer: Any,
     config: SpinalCordPipelineConfig,
     *,
-    data: Any | None = None,
+    data: CordMatchPointsData | None = None,
 ) -> DockStageController:
-    """Attach spinal cord control-point matching controls to an existing napari viewer."""
-    from magicgui.widgets import Label
+    """Attach the control-point GUI to an existing napari viewer."""
     from napari.utils.notifications import show_info
-    from qtpy.QtCore import QTimer
+    from qtpy.QtCore import QEvent, QObject, QTimer
+    from qtpy.QtWidgets import QInputDialog, QMessageBox
 
-    magicgui = require_magicgui()
+    require_napari()
     if data is None:
         data = load_cord_match_points_data(config)
-    n_slices = int(data.chooselist.shape[0])
-    state = {
-        "slice": 1,
-        "show_overlay": True,
-        "_nav_syncing": False,
-        "_view_shape": None,
-        "_warped_annotation_key": None,
-        "_warped_annotation": None,
+    session = data.session
+    chooselist = np.asarray(data.chooselist, dtype=int)
+    n_slots = int(chooselist.shape[0])
+
+    sample_u8 = sample_display_volume(data.sample_volume)
+    atlas_u8 = atlas_display_volume(data.atlas_template, data.atlas_template_max)
+    annotation = np.asarray(data.atlas_annotation)
+    rows, cols, nz = sample_u8.shape
+    depth = int(atlas_u8.shape[2])
+    lay = _layout(rows, cols, nz)
+
+    # Both maximum projections in one image (MATLAB: max over the rows, cord axis
+    # horizontal), each strip scaled to its own range like imagesc.
+    mip_sample = sample_u8.max(axis=0)
+    mip_atlas = atlas_u8.max(axis=0)
+    projections = np.zeros((2 * cols + lay.mip_gap_px, nz), dtype=np.float32)
+    projections[:cols] = _unit_range(mip_sample, float(mip_sample.min()), float(mip_sample.max()))
+    projections[cols + lay.mip_gap_px :] = _unit_range(
+        mip_atlas, float(mip_atlas.min()), float(mip_atlas.max())
+    )
+    # Sample (left) and atlas (right) slices share one image, each half scaled to its
+    # MATLAB CLim, so a slice change updates a single texture.
+    panels = np.zeros((rows, 2 * cols + lay.gap), dtype=np.float32)
+
+    auto = (
+        np.asarray(session.atlas2histology_tform, dtype=float)
+        if data.session_loaded_from_file and session.atlas2histology_tform is not None
+        else None
+    )
+    state: dict[str, Any] = {
+        "slot": 1,
+        "atlas_slice": 1,
+        "manual": np.eye(4) if auto is None else auto.copy(),
+        "status": "",
+        "saved_flash": False,
+        "teardown": False,
+        "dirty": False,
     }
 
+    # ---------------------------------------------------------------- layers
     viewer.dims.ndisplay = 2
-    sample_layer = viewer.add_image(np.zeros((10, 10)), name="sample", colormap="gray")
-    atlas_layer = viewer.add_image(np.zeros((10, 10)), name="atlas", colormap="gray")
+    panels_layer = viewer.add_image(panels, name="slices", colormap="gray", contrast_limits=(0, 1))
     overlay_layer = viewer.add_image(
-        np.zeros((10, 10)),
-        name="overlay",
+        np.zeros((rows, cols), np.float32),
+        name="atlas boundaries",
         colormap="red",
-        opacity=0.35,
-        visible=True,
+        contrast_limits=(0, 1),
         blending="additive",
     )
-    sample_pts = viewer.add_points(
+    proj_layer = viewer.add_image(
+        projections,
+        name="max projections",
+        colormap="gray",
+        contrast_limits=(0, 1),
+        scale=(lay.mip_scale, lay.mip_scale),
+        translate=(lay.mip_row0_sample, lay.mip_col0),
+    )
+    strip_height = cols * lay.mip_scale
+    strip_top = -0.5 * lay.mip_scale  # first projection row starts half a pixel above its centre
+
+    def _marker_vectors(x_sample: float, x_atlas: float) -> np.ndarray:
+        # vertical lines across each projection strip: [[start], [direction]]
+        return np.array(
+            [
+                [[lay.mip_row0_sample + strip_top, x_sample], [strip_height, 0.0]],
+                [[lay.mip_row0_atlas + strip_top, x_atlas], [strip_height, 0.0]],
+            ]
+        )
+
+    markers = viewer.add_vectors(
+        _marker_vectors(lay.mip_col0, lay.mip_col0),
+        edge_color=["red", "blue"],
+        edge_width=max(0.4, 0.004 * (2 * cols + lay.gap)),  # ~2 px, MATLAB LineWidth 2
+        vector_style="line",
+        name="slice markers",
+    )
+    marker = max(rows, cols) / 60.0
+    text_style = {"string": "{label}", "color": "yellow", "size": 10, "anchor": "upper_left"}
+    hist_pts = viewer.add_points(
         np.zeros((0, 2)),
-        name="sample_points",
-        face_color="yellow",
-        size=3,
-        ndim=2,
+        features={"label": np.array([], dtype=object)},
+        text=text_style,
+        face_color="lime",
+        border_color="lime",
+        size=marker,
+        name="sample points",
     )
     atlas_pts = viewer.add_points(
         np.zeros((0, 2)),
-        name="atlas_points",
-        face_color="cyan",
-        size=3,
-        ndim=2,
-    )
-    _configure_point_text(sample_pts)
-    _configure_point_text(atlas_pts)
-
-    points_summary = Label(
-        label="Session totals",
-        value="Total points: 0 matched pairs (0 on sample, 0 on atlas)",
+        features={"label": np.array([], dtype=object)},
+        text=text_style,
+        face_color="red",
+        border_color="red",
+        size=marker,
+        translate=(0, lay.atlas_col0),
+        name="atlas points",
     )
 
-    def _apply_layer_points(layer, xy: np.ndarray) -> None:
-        labels = _pair_labels(int(xy.shape[0]))
-        with layer.events.data.blocker():
-            layer.data = xy
-            if hasattr(layer, "text"):
-                try:
-                    layer.text = labels
-                except (TypeError, ValueError, AttributeError):
-                    pass
-            _configure_point_text(layer)
-
-    def _warped_annotation_volume(matrix: np.ndarray) -> np.ndarray:
-        key = np.asarray(matrix, dtype=float).tobytes()
-        if state["_warped_annotation_key"] == key and state["_warped_annotation"] is not None:
-            return state["_warped_annotation"]
-        warped = warp_volume_affine(
-            data.atlas_annotation.astype(np.float32),
-            matrix,
-            data.sample_volume.shape,
-            order=0,
-            point_coords="xyz",
-        )
-        state["_warped_annotation_key"] = key
-        state["_warped_annotation"] = warped
-        return warped
-
-    def _layout_panels() -> None:
-        _h, w = sample_layer.data.shape
-        sample_layer.translate = (0.0, 0.0)
-        overlay_layer.translate = (0.0, 0.0)
-        sample_pts.translate = (0.0, 0.0)
-        atlas_offset = (0.0, float(w + PANEL_GAP_X))
-        atlas_layer.translate = atlas_offset
-        atlas_pts.translate = atlas_offset
-
-    def _atlas_plane_limits() -> tuple[int, int]:
-        row = np.asarray(data.chooselist[state["slice"] - 1], dtype=int)
-        from lightsuite.gui.cord_data import atlas_cut_axis_size
-
-        nmax = atlas_cut_axis_size(data.atlas_template.shape, row)
-        return 1, nmax
-
-    def _resolved_atlas_plane(plane: int | None = None) -> int:
-        pmin, pmax = _atlas_plane_limits()
-        if plane is None:
-            plane = state.get("_atlas_plane")
-        if plane is None:
-            plane = resolve_atlas_plane_index(data, state["slice"])
-        return int(np.clip(int(plane), pmin, pmax))
-
-    def _set_atlas_plane(plane: int, *, persist: bool = True) -> None:
-        plane = _resolved_atlas_plane(plane)
-        if persist:
-            set_atlas_plane_index(data.session, state["slice"], plane)
-        _refresh(atlas_plane=plane)
-
-    def _update_point_count_display() -> None:
-        matched, total_sample, total_atlas = data.session.point_counts()
-        points_summary.value = (
-            f"Total points: {matched} matched pairs "
-            f"({total_sample} on sample, {total_atlas} on atlas)"
+    def _label_layer(name: str, pos: list[list[float]], texts: list[str], color: str) -> Any:
+        return viewer.add_points(
+            np.asarray(pos, dtype=float),
+            features={"label": np.asarray(texts, dtype=object)},
+            text={"string": "{label}", "color": color, "size": 11, "anchor": "lower_left"},
+            face_color="transparent",
+            border_color="transparent",
+            size=0.01,
+            name=name,
         )
 
-    def _update_status() -> None:
-        idx = state["slice"]
-        plane = _resolved_atlas_plane()
-        _pmin, pmax = _atlas_plane_limits()
-        n_s = len(data.session.histology_control_points[idx - 1])
-        n_a = len(data.session.atlas_control_points[idx - 1])
-        matched, total_sample, total_atlas = data.session.point_counts()
-        caption = _chooselist_slice_label(data.chooselist, idx)
-        overlay_flag = "on" if state["show_overlay"] else "off"
-        pair_info = _pair_status(n_s, n_a)
-        _update_point_count_display()
-        fit_state = (
-            "affine fit active"
-            if matched >= MIN_AFFINE_PAIRS
-            else f"coarse align (need {MIN_AFFINE_PAIRS} pairs for affine, have {matched})"
-        )
-        viewer.status = (
-            f"Slice {idx}/{n_slices} ({caption}) | {pair_info} "
-            f"| all slices: {matched} pairs ({total_sample} sample / {total_atlas} atlas) "
-            f"| {fit_state} | atlas plane {plane}/{pmax} | overlay {overlay_flag} (O)"
-        )
-
-    def _refresh(*, atlas_plane: int | None = None) -> None:
-        idx = state["slice"]
-        state["_atlas_plane"] = _resolved_atlas_plane(atlas_plane)
-        sample, atlas = slice_pair(data, idx, atlas_plane=state["_atlas_plane"])
-        sample_layer.data = sample
-        atlas_layer.data = atlas
-        _layout_panels()
-        chooserow = np.asarray(data.chooselist[idx - 1], dtype=int)
-        slice_shape = _raw_slice_shape(data.sample_volume, chooserow)
-        with sample_pts.events.data.blocker(), atlas_pts.events.data.blocker():
-            _apply_layer_points(
-                sample_pts,
-                _volume_points_to_layer_xy(
-                    data.session.histology_control_points[idx - 1],
-                    chooserow,
-                    slice_shape=slice_shape,
-                ),
-            )
-            _apply_layer_points(
-                atlas_pts,
-                _volume_points_to_layer_xy(
-                    data.session.atlas_control_points[idx - 1],
-                    chooserow,
-                    slice_shape=slice_shape,
-                ),
-            )
-        matrix = np.asarray(data.session.atlas2histology_tform, dtype=float)
-        if state["show_overlay"]:
-            overlay_layer.data = _boundary_overlay(
-                _warped_annotation_volume(matrix),
-                chooserow,
-            )
-            overlay_layer.visible = True
-        else:
-            overlay_layer.visible = False
-        _update_status()
-        if state["_view_shape"] != sample.shape:
-            viewer.reset_view()
-            state["_view_shape"] = sample.shape
-
-    def _try_align() -> None:
-        mse = data.session.update_manual_alignment(
-            min_pairs=MIN_AFFINE_PAIRS,
-            constrain_cut_axis=CORD_CUT_AXIS,
-        )
-        if mse is not None:
-            show_info(f"Updated alignment fit (MSE={mse:.2f})")
-        else:
-            matched, _total_s, _total_a = data.session.point_counts()
-            remaining = MIN_AFFINE_PAIRS - matched
-            if remaining > 0:
-                show_info(
-                    f"{matched}/{MIN_AFFINE_PAIRS} matched pairs — "
-                    f"add {remaining} more (across slices) before the affine fit runs"
-                )
-        _refresh()
-
-    def _on_panel_points_changed(panel: str) -> None:
-        idx = state["slice"]
-        layer = sample_pts if panel == "sample" else atlas_pts
-        plane = _resolved_atlas_plane() if panel == "atlas" else None
-        chooserow = np.asarray(data.chooselist[idx - 1], dtype=int)
-        _sync_store_from_layer(
-            data.session,
-            idx,
-            panel,
-            np.asarray(layer.data, dtype=float),
-            slice_shape=_raw_slice_shape(data.sample_volume, chooserow),
-            atlas_plane=plane,
-        )
-        n_s = len(data.session.histology_control_points[idx - 1])
-        n_a = len(data.session.atlas_control_points[idx - 1])
-        if n_s == n_a:
-            _try_align()
-
-    @sample_pts.events.data.connect
-    def _sample_changed(_event=None) -> None:
-        _on_panel_points_changed("sample")
-
-    @atlas_pts.events.data.connect
-    def _atlas_changed(_event=None) -> None:
-        _on_panel_points_changed("atlas")
-
-    def _sync_navigation_widget() -> None:
-        state["_nav_syncing"] = True
-        try:
-            navigation.slice_index.value = int(state["slice"])
-            navigation.show_overlay.value = bool(state["show_overlay"])
-            pmin, pmax = _atlas_plane_limits()
-            navigation.atlas_plane.min = pmin
-            navigation.atlas_plane.max = pmax
-            navigation.atlas_plane.value = _resolved_atlas_plane()
-        finally:
-            state["_nav_syncing"] = False
-
-    def _refocus_canvas() -> None:
-        try:
-            qt_viewer = viewer.window._qt_viewer
-        except AttributeError:
-            try:
-                qt_viewer = viewer.window.qt_viewer
-            except AttributeError:
-                return
-        canvas_native = getattr(getattr(qt_viewer, "canvas", None), "native", None)
-        for target in (canvas_native, qt_viewer):
-            if target is not None and hasattr(target, "setFocus"):
-                target.setFocus()
-                return
-
-    def _navigate_to(
-        slice_index: int | None = None,
-        *,
-        show_overlay: bool | None = None,
-        refocus_canvas: bool = False,
-    ) -> None:
-        if show_overlay is not None:
-            state["show_overlay"] = bool(show_overlay)
-        if slice_index is not None:
-            new_slice = max(1, min(n_slices, int(slice_index)))
-            if new_slice != state["slice"]:
-                state["_atlas_plane"] = None
-            state["slice"] = new_slice
-        if refocus_canvas:
-            _refresh()
-
-            def _after_keyboard_nav() -> None:
-                _sync_navigation_widget()
-                _refocus_canvas()
-
-            QTimer.singleShot(0, _after_keyboard_nav)
-        else:
-            _refresh()
-            _sync_navigation_widget()
-
-    @magicgui(
-        slice_index={
-            "min": 1,
-            "max": n_slices,
-            "step": 1,
-            "label": "Slice # (chooselist index)",
-        },
-        atlas_plane={
-            "min": 1,
-            "max": 100,
-            "step": 1,
-            "label": "Atlas plane along cut axis",
-        },
-        show_overlay={"label": "Atlas boundary overlay on sample (shortcut: O)"},
-        call_button=False,
-        auto_call=False,
+    titles = _label_layer(
+        "titles",
+        # third, empty label: headroom above the panels so napari's screen-space title
+        # (the MATLAB figure title) does not cover the axis titles after "fit to view"
+        [[lay.title_row, 0.0], [lay.title_row, lay.atlas_col0], [-0.45 * rows, 0.0]],
+        ["Sample Slice", "Atlas slice", ""],
+        "white",
     )
-    def navigation(slice_index: int = 1, atlas_plane: int = 1, show_overlay: bool = True) -> None:
-        _navigate_to(slice_index, show_overlay=show_overlay)
-        _set_atlas_plane(atlas_plane)
+    proj_labels = _label_layer(
+        "projection labels",
+        [[lay.mip_row0_sample + 0.35 * strip_height, lay.mip_col0 + 2]],
+        ["Sample Max Projection"],
+        "red",
+    )
+    proj_labels_atlas = _label_layer(
+        "atlas projection label",
+        [[lay.mip_row0_atlas + 0.35 * strip_height, lay.mip_col0 + 2]],
+        ["Atlas Max Projection"],
+        "dodgerblue",
+    )
+    added = [
+        panels_layer, overlay_layer, proj_layer, markers, hist_pts, atlas_pts,
+        titles, proj_labels, proj_labels_atlas,
+    ]  # fmt: skip
 
-    @navigation.atlas_plane.changed.connect
-    def _atlas_plane_widget_changed() -> None:
-        if state["_nav_syncing"]:
+    # Slim napari down: no layer docks, no editing, no mouse pan/zoom, no double-click zoom.
+    camera = viewer.camera
+    camera_before = (camera.mouse_pan, camera.mouse_zoom)
+    for layer in added:
+        layer.mouse_pan = False
+        layer.mouse_zoom = False
+        if hasattr(layer, "editable"):
+            layer.editable = False
+    viewer.layers.selection.active = panels_layer
+    camera.mouse_pan = False
+    camera.mouse_zoom = False
+    removed_double_click = [
+        cb
+        for cb in list(viewer.mouse_double_click_callbacks)
+        if getattr(cb, "__name__", "") == "double_click_to_zoom"
+    ]
+    for cb in removed_double_click:
+        viewer.mouse_double_click_callbacks.remove(cb)
+    hidden_docks = []
+    qt_viewer = getattr(viewer.window, "_qt_viewer", None)
+    for name in ("dockLayerList", "dockLayerControls"):
+        dock = getattr(qt_viewer, name, None)
+        if dock is not None and dock.isVisible():
+            dock.setVisible(False)
+            hidden_docks.append(dock)
+    overlay = viewer.text_overlay
+    overlay_before = (
+        overlay.visible,
+        overlay.text,
+        overlay.position,
+        overlay.font_size,
+        overlay.color,
+    )
+    overlay.visible = True
+    overlay.position = "top_center"
+    overlay.font_size = 10
+    overlay.color = "white"
+    viewer.reset_view()
+    state["min_zoom"] = camera.zoom
+
+    # ---------------------------------------------------------------- drawing
+    def slot_lists(slot: int | None = None) -> tuple[list, list]:
+        i = (state["slot"] if slot is None else slot) - 1
+        return session.histology_control_points[i], session.atlas_control_points[i]
+
+    def sample_slice() -> int:
+        return int(chooselist[state["slot"] - 1, 0])
+
+    def update_title() -> None:
+        if state["teardown"]:
             return
-        _set_atlas_plane(navigation.atlas_plane.value)
-
-    @magicgui(call_button="◀  Previous slice")
-    def previous_slice() -> None:
-        _navigate_to(state["slice"] - 1)
-
-    @magicgui(call_button="Next slice  ▶")
-    def next_slice() -> None:
-        _navigate_to(state["slice"] + 1)
-
-    @navigation.slice_index.changed.connect
-    def _slice_index_widget_changed() -> None:
-        if state["_nav_syncing"]:
+        if state["saved_flash"]:
+            overlay.text = "SAVED!"
             return
-        _navigate_to(navigation.slice_index.value)
+        overlay.text = f"{BASE_TITLE}\n{CONTROLS}\n{state['status']}"
 
-    @navigation.show_overlay.changed.connect
-    def _overlay_widget_changed() -> None:
-        if state["_nav_syncing"]:
+    def set_points(layer: Any, pts: list[list[float]]) -> None:
+        if pts:
+            arr = np.asarray(pts, dtype=float)
+            xy = np.column_stack([arr[:, 0] - 1.0, arr[:, 1] - 1.0])  # 1-based -> napari
+        else:
+            xy = np.zeros((0, 2))
+        layer.data = xy
+        layer.features = {"label": np.asarray([str(i + 1) for i in range(len(xy))], dtype=object)}
+
+    def update_markers(kind: str) -> None:
+        hist, atl = slot_lists()
+        if kind == "histology":
+            set_points(hist_pts, hist)
+        else:
+            set_points(atlas_pts, atl)
+
+    def set_titles() -> None:
+        titles.features = {
+            "label": np.asarray(
+                [
+                    f"Sample Slice {sample_slice()}",
+                    f"Atlas slice {state['atlas_slice']}/{depth}",
+                    "",
+                ],
+                dtype=object,
+            )
+        }
+
+    def set_slice_markers() -> None:
+        xs = lay.mip_col0 + lay.mip_scale * (np.array([sample_slice(), state["atlas_slice"]]) - 1)
+        markers.data = _marker_vectors(float(xs[0]), float(xs[1]))
+        markers.edge_color = ["red", "blue"]
+
+    def align() -> None:
+        matrix, status = fit_cord_alignment(session, auto)
+        state["manual"] = matrix
+        state["status"] = status
+        plane = warped_annotation_plane(annotation, matrix, sample_slice())
+        overlay_layer.data = boundary_mask(plane).astype(np.float32)
+        update_title()
+
+    def draw_atlas_panel() -> None:
+        img = clahe_uint8(atlas_u8[:, :, state["atlas_slice"] - 1])
+        panels[:, cols + lay.gap :] = _unit_range(img, *ATLAS_CLIM)
+
+    def update_atlas_slice() -> None:
+        state["atlas_slice"] = int(np.clip(state["atlas_slice"], 1, depth))
+        draw_atlas_panel()
+        panels_layer.data = panels
+        set_titles()
+        set_slice_markers()
+        update_markers("atlas")
+
+    def update_slice() -> None:
+        if state["teardown"]:
             return
-        _navigate_to(show_overlay=navigation.show_overlay.value)
+        z = sample_slice()
+        img = clahe_uint8(sample_u8[:, :, z - 1])
+        _hist, atl = slot_lists()
+        state["atlas_slice"] = atlas_plane_for_slice(atl, state["manual"], (rows, cols), z)
+        panels[:, :cols] = _unit_range(img, 0.0, max(image_limits(img)[1], 1.0))
+        update_markers("histology")
+        align()
+        update_atlas_slice()
 
-    @magicgui(call_button="Save && Close")
-    def save_controls() -> None:
-        mark_session_saved_from_napari(data.session)
-        data.session.save(data.session_path)
-        show_info(f"Saved {data.session_path}")
-        QTimer.singleShot(0, lambda: close_stage_or_viewer(viewer))
+    def mark_changed() -> None:
+        state["dirty"] = True
 
-    @magicgui(call_button="Clear slice points")
-    def clear_slice() -> None:
-        idx = state["slice"]
-        data.session.histology_control_points[idx - 1] = []
-        data.session.atlas_control_points[idx - 1] = []
-        _refresh()
-
-    def _toggle_overlay(_viewer) -> None:
-        _navigate_to(show_overlay=not state["show_overlay"], refocus_canvas=True)
-
-    def _previous_slice_key(_viewer) -> None:
-        _navigate_to(state["slice"] - 1, refocus_canvas=True)
-
-    def _next_slice_key(_viewer) -> None:
-        _navigate_to(state["slice"] + 1, refocus_canvas=True)
-
-    def _point_timestamp(point: list[float]) -> float:
-        ts = point[3]
-        if ts is None or (isinstance(ts, float) and np.isnan(ts)):
-            return float("-inf")
-        return float(ts)
-
-    def _atlas_plane_step(delta: int) -> None:
-        plane = _resolved_atlas_plane() + int(delta)
-        _set_atlas_plane(plane)
-        _sync_navigation_widget()
-        _refocus_canvas()
-
-    def _atlas_plane_up(_viewer) -> None:
-        _atlas_plane_step(1)
-
-    def _atlas_plane_down(_viewer) -> None:
-        _atlas_plane_step(-1)
-
-    def _delete_last_point_key(_viewer) -> None:
-        idx = state["slice"]
-        hist = data.session.histology_control_points[idx - 1]
-        atlas = data.session.atlas_control_points[idx - 1]
-        t_hist = _point_timestamp(hist[-1]) if hist else float("-inf")
-        t_atlas = _point_timestamp(atlas[-1]) if atlas else float("-inf")
-        if t_hist >= t_atlas and hist:
-            hist.pop()
-        elif atlas:
-            atlas.pop()
-        _navigate_to(refocus_canvas=True)
-
-    viewer.bind_key("O", _toggle_overlay)
-    viewer.bind_key("Left", _previous_slice_key, overwrite=True)
-    viewer.bind_key("Right", _next_slice_key, overwrite=True)
-    viewer.bind_key("Backspace", _delete_last_point_key, overwrite=True)
-    viewer.bind_key("PageUp", _atlas_plane_up, overwrite=True)
-    viewer.bind_key("PageDown", _atlas_plane_down, overwrite=True)
-
-    @viewer.window._qt_viewer.canvas.events.mouse_wheel.connect
-    def _scroll_atlas_plane(event) -> None:
-        if getattr(event, "delta", None) is None:
+    # ---------------------------------------------------------------- mouse
+    def on_press(_viewer: Any, event: Any) -> None:
+        if state["teardown"] or event.type != "mouse_press":
             return
-        dy = event.delta[1] if len(event.delta) > 1 else event.delta[0]
+        row, col = (float(v) for v in event.position[-2:])
+        inside_rows = -0.5 <= row <= rows - 0.5
+        hist, atl = slot_lists()
+        if inside_rows and -0.5 <= col <= cols - 0.5:
+            hist.append([row + 1.0, col + 1.0, float(sample_slice()), matlab_datenum_now()])
+            update_markers("histology")
+        elif inside_rows and -0.5 <= col - lay.atlas_col0 <= cols - 0.5:
+            atl.append(
+                [
+                    row + 1.0,
+                    col - lay.atlas_col0 + 1.0,
+                    float(state["atlas_slice"]),
+                    matlab_datenum_now(),
+                ]
+            )
+            update_markers("atlas")
+        else:
+            return
+        mark_changed()
+        if len(hist) == len(atl):
+            align()
+
+    def zoom_at(position: Any, factor: float) -> None:
+        new_zoom = float(np.clip(camera.zoom * factor, state["min_zoom"], state["min_zoom"] * 40))
+        factor = new_zoom / camera.zoom
+        cursor = np.asarray(position, dtype=float)[-2:]
+        center = np.asarray(camera.center, dtype=float)
+        center[-2:] = cursor + (center[-2:] - cursor) / factor
+        camera.zoom = new_zoom
+        camera.center = tuple(center)
+
+    def on_wheel(_viewer: Any, event: Any) -> None:
+        if state["teardown"]:
+            return
+        delta = getattr(event, "delta", None)
+        if delta is None:
+            return
+        dy = float(delta[1]) if len(delta) > 1 else float(delta[0])
         if dy == 0:
             return
-        pos = getattr(viewer.window._qt_viewer.cursor, "position", None)
-        if pos is None:
+        event.handled = True
+        if "Control" in getattr(event, "modifiers", ()):
+            zoom_at(event.position, ZOOM_STEP if dy > 0 else 1.0 / ZOOM_STEP)
             return
-        w = float(sample_layer.data.shape[1])
-        col = float(pos[-1]) if len(pos) >= 2 else float(pos[0])
-        if col < w + PANEL_GAP_X * 0.5:
-            return
-        step = 1 if dy < 0 else -1
-        _atlas_plane_step(step)
-        _sync_navigation_widget()
+        # MATLAB VerticalScrollCount is positive when scrolling down
+        state["atlas_slice"] += ATLAS_SCROLL_STEP * (1 if dy < 0 else -1)
+        update_atlas_slice()
 
-    def _initial_refresh() -> None:
-        if data.session.point_counts()[0] >= MIN_AFFINE_PAIRS:
-            data.session.update_manual_alignment(
-                min_pairs=MIN_AFFINE_PAIRS,
-                constrain_cut_axis=CORD_CUT_AXIS,
+    viewer.mouse_drag_callbacks.append(on_press)
+    viewer.mouse_wheel_callbacks.append(on_wheel)
+
+    # ---------------------------------------------------------------- keys
+    def go_slot(slot: int) -> None:
+        state["slot"] = int(np.clip(slot, 1, n_slots))
+        update_slice()
+
+    def jump() -> None:
+        text, ok = QInputDialog.getText(
+            viewer.window._qt_window, "Go to slice", f"Go to slice (max {n_slots}):"
+        )
+        if not ok:
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            return
+        if np.isfinite(value) and value == int(value) and 1 <= value <= n_slots:
+            go_slot(int(value))
+
+    def toggle_overlay() -> None:
+        overlay_layer.visible = not overlay_layer.visible
+
+    def clear_slot() -> None:
+        i = state["slot"] - 1
+        session.histology_control_points[i] = []
+        session.atlas_control_points[i] = []
+        mark_changed()
+        update_slice()
+
+    def backspace() -> None:
+        hist, atl = slot_lists()
+        if delete_last_point(hist, atl):
+            mark_changed()
+        align()
+        update_slice()
+
+    def save() -> Path:
+        path = save_cord_session(session, data.session_path, state["manual"])
+        state["dirty"] = False
+        state["saved_flash"] = True
+        update_title()
+
+        def _restore() -> None:
+            state["saved_flash"] = False
+            update_title()
+
+        QTimer.singleShot(200, _restore)
+        console.print(f"Saved {path}")
+        show_info(f"Saved {path.name}")
+        return path
+
+    def reset_view() -> None:
+        viewer.reset_view()
+        state["min_zoom"] = camera.zoom
+
+    key_actions = {
+        "Left": lambda: go_slot(state["slot"] - 1),
+        "Right": lambda: go_slot(state["slot"] + 1),
+        "Enter": jump,
+        "Return": jump,
+        "Space": toggle_overlay,
+        "c": clear_slot,
+        "Backspace": backspace,
+        "s": save,
+        "r": reset_view,
+        "Home": reset_view,
+    }
+    previous_bindings: dict[str, Any] = {}
+    for key, action in key_actions.items():
+        try:
+            previous_bindings[key] = viewer.bind_key(
+                key, lambda _v, _a=action: _a(), overwrite=True
             )
-        _refresh()
-        _sync_navigation_widget()
+        except (KeyError, ValueError, TypeError):
+            continue
+        # the active layer's keymap wins over the viewer's (Image binds C, X, ...)
+        for layer in added:
+            layer.bind_key(key, lambda _layer, _a=action: _a(), overwrite=True)
 
-    return DockStageController(
-        dock_widgets=[
-            (points_summary, "Point counts"),
-            (navigation, "Navigation"),
-            (previous_slice, "Previous slice"),
-            (next_slice, "Next slice"),
-            (save_controls, "Save"),
-            (clear_slice, "Edit"),
-        ],
-        _refresh_fn=_initial_refresh,
+    # MATLAB CloseRequestFcn: "Save changes?" Yes / No / Cancel
+    class _CloseGuard(QObject):
+        def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 (Qt API)
+            if event.type() != QEvent.Close or state["teardown"]:
+                return False
+            answer = QMessageBox.question(
+                viewer.window._qt_window,
+                "Confirm exit",
+                "Save changes?",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Yes,
+            )
+            if answer == QMessageBox.Cancel:
+                event.ignore()
+                return True
+            if answer == QMessageBox.Yes:
+                save_cord_session(session, data.session_path, state["manual"])
+                console.print(f"Saved {data.session_path}")
+            state["teardown"] = True
+            return False
+
+    close_guard = _CloseGuard()
+    qt_window = getattr(viewer.window, "_qt_window", None)
+    if qt_window is not None:
+        qt_window.installEventFilter(close_guard)
+
+    def refresh() -> None:
+        state["dirty"] = False
+        update_slice()
+
+    def teardown() -> None:
+        state["teardown"] = True
+        if qt_window is not None:
+            try:
+                qt_window.removeEventFilter(close_guard)
+            except RuntimeError:
+                pass
+        for cb_list, cb in (
+            (viewer.mouse_drag_callbacks, on_press),
+            (viewer.mouse_wheel_callbacks, on_wheel),
+        ):
+            if cb in cb_list:
+                cb_list.remove(cb)
+        for cb in removed_double_click:
+            if cb not in viewer.mouse_double_click_callbacks:
+                viewer.mouse_double_click_callbacks.append(cb)
+        for key, previous in previous_bindings.items():
+            try:
+                viewer.bind_key(key, previous, overwrite=True)  # None unbinds
+            except (KeyError, TypeError, ValueError):
+                pass
+        camera.mouse_pan, camera.mouse_zoom = camera_before
+        for dock in hidden_docks:
+            try:
+                dock.setVisible(True)
+            except RuntimeError:
+                pass
+        (overlay.visible, overlay.text, overlay.position, overlay.font_size, overlay.color) = (
+            overlay_before
+        )
+        for layer in added:
+            if layer in viewer.layers:
+                viewer.layers.remove(layer)
+
+    controller = DockStageController(
+        dock_widgets=[],
+        _refresh_fn=refresh,
+        _teardown_fn=teardown,
         result=data.session_path,
     )
+    controller._gui_state = state  # for tests
+    return controller
 
 
 def run_spinal_match_points(
@@ -615,28 +762,22 @@ def run_spinal_match_points(
     *,
     headless: bool = False,
 ) -> Path:
-    """Launch Napari control-point matcher; returns saved session path."""
+    """Launch the control-point GUI; returns the session path."""
     if headless:
         return prepare_cord_match_points_session(config)
 
     data = load_cord_match_points_data(config)
-    title = f"LightSuite spinal — {config.sample.name}"
 
     def _attach(viewer: Any) -> DockStageController:
         return attach_spinal_match_points(viewer, config, data=data)
 
     run_attached_stage(
-        title,
+        f"Control point GUI - {config.sample.name}",
         _attach,
         before_run=lambda: console.print(
-            "[bold]Napari spinal control-point GUI[/bold] — sample (left), atlas (right). "
-            "Numbered markers are matched pairs (1↔1, 2↔2, …). "
-            "Scroll the wheel over the atlas (or PgUp/PgDn) to adjust the atlas plane. "
-            "Shortcuts: [bold]←[/bold]/[bold]→[/bold] chooselist slices, [bold]O[/bold] overlay, "
-            "[bold]Backspace[/bold] undo last point."
+            "[bold]Control point GUI (spine)[/bold]: click on the sample (left) and atlas (right) "
+            "to add matching points; scroll moves the atlas plane, ←/→ change slice, "
+            "Backspace deletes, C clears, Space toggles the overlay, Enter jumps, S saves."
         ),
     )
-    if not data.session_path.is_file():
-        mark_session_saved_from_napari(data.session)
-        data.session.save(data.session_path)
     return data.session_path

@@ -12,8 +12,7 @@ import tifffile
 from scipy import ndimage
 
 from lightsuite.config.models import SpinalCordPipelineConfig
-from lightsuite.gui.control_points import ControlPointSession
-from lightsuite.gui.cord_data import default_cord_session_path
+from lightsuite.gui.cord_data import default_cord_session_path, load_cord_session
 from lightsuite.preprocess.cord_checkpoint import (
     CordRegOptsCheckpoint,
     CordTransformParamsCheckpoint,
@@ -86,7 +85,8 @@ def run_spinal_registration(config: SpinalCordPipelineConfig) -> Path:
     cptsatlas = np.zeros((0, 3))
     cp_path = default_cord_session_path(save_path)
     if cp_path.is_file() and cpwt > 0:
-        session = ControlPointSession.load(cp_path)
+        # 1-based [row, col, slice] like MATLAB; older Python sessions are converted
+        session = load_cord_session(cp_path)
         cptsatlas, cptshistology = session.paired_points_xyz()
         if cptshistology.shape[0] > 0:
             emit_pipeline_message(

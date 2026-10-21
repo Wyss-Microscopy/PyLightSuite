@@ -140,17 +140,28 @@ def generate_cord_longitudinal_list(
     ).astype(int)
 
 
+# MATLAB ``rng(1); randperm(100)`` (Mersenne Twister, R2024a), 1-based. The cord GUI
+# shows its 100 slices in this order, so slice numbers match matchControlPoints_unified.m.
+MATLAB_RANDPERM_100_SEED1: tuple[int, ...] = (
+    3, 99, 39, 51, 15, 28, 65, 56, 27, 6, 31, 61, 45, 91, 50, 72, 73, 19, 58, 5,
+    76, 29, 7, 20, 13, 53, 96, 54, 85, 43, 49, 48, 4, 23, 36, 8, 78, 84, 9, 75,
+    95, 62, 64, 1, 17, 11, 32, 87, 46, 93, 55, 68, 34, 66, 10, 18, 98, 57, 94, 70,
+    59, 100, 90, 82, 89, 67, 16, 52, 12, 37, 35, 24, 63, 60, 2, 80, 42, 40, 79, 83,
+    44, 21, 74, 38, 25, 14, 30, 81, 26, 86, 97, 71, 47, 77, 69, 92, 33, 88, 22, 41,
+)
+
+
 def generate_cord_control_point_list(
     length_axis_size: int,
     n_slices: int = 100,
     *,
     cut_axis: int = 3,
 ) -> np.ndarray:
-    """Return chooselist rows for spinal cord match-points (matchControlPointsSpine.m).
+    """Return chooselist rows for spinal cord match-points (matchControlPoints_unified.m).
 
-    Cord registration always cuts transverse slices along the rostrocaudal axis (volume
-    dimension 3 after straightening). Rows are ``[slice_index, cut_axis, 1, 1]`` and
-    shuffled with seed 1 to match MATLAB ``rng(1); randperm(...)``.
+    ``round(linspace(1, N, n_slices))`` sample slices, rows ``[slice_index, cut_axis, 1, 1]``,
+    shuffled exactly like MATLAB's ``rng(1); randperm(n_slices)`` for the default 100
+    slices (other counts fall back to a seeded numpy permutation).
     """
     if cut_axis not in {1, 2, 3}:
         msg = f"cut_axis must be 1, 2, or 3, got {cut_axis}"
@@ -158,7 +169,8 @@ def generate_cord_control_point_list(
     if length_axis_size < 1:
         msg = f"length_axis_size must be >= 1, got {length_axis_size}"
         raise ValueError(msg)
-    sids = np.round(np.linspace(1, length_axis_size, n_slices)).astype(int)
+    # MATLAB round() rounds halves away from zero
+    sids = np.floor(np.linspace(1, length_axis_size, n_slices) + 0.5).astype(int)
     sids = np.clip(sids, 1, length_axis_size)
     chooselist = np.column_stack(
         [
@@ -168,5 +180,10 @@ def generate_cord_control_point_list(
             np.ones(n_slices, dtype=int),
         ]
     )
-    rng = np.random.default_rng(1)
-    return chooselist[rng.permutation(n_slices)].astype(int)
+    if n_slices == len(MATLAB_RANDPERM_100_SEED1):
+        order = np.asarray(MATLAB_RANDPERM_100_SEED1, dtype=int) - 1
+    else:
+        order = np.random.default_rng(1).permutation(n_slices)
+    return chooselist[order].astype(int)
+
+
