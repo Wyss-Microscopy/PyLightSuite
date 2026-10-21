@@ -19,11 +19,14 @@ from lightsuite.gui.cord_data import (
     slice_pair,
 )
 from lightsuite.gui.match_points_cord import (
-    _layer_xy_to_volume_point,
-    _pair_status,
-    _volume_points_to_layer_xy,
+    atlas_plane_for_slice,
+    auto_atlas_plane,
+    boundary_mask,
+    delete_last_point,
+    fit_cord_alignment,
+    matlab_round,
+    warped_annotation_plane,
 )
-from lightsuite.gui.slices import volume_index_to_image
 
 
 def test_generate_cord_control_point_list_shape_and_axis() -> None:
@@ -38,29 +41,6 @@ def test_generate_cord_control_point_list_is_deterministic() -> None:
     a = generate_cord_control_point_list(40)
     b = generate_cord_control_point_list(40)
     assert np.array_equal(a, b)
-
-
-def test_cord_layer_xy_roundtrip() -> None:
-    vol = np.zeros((24, 24, 30), dtype=np.float32)
-    chooserow = np.array([12, 3, 1, 1], dtype=int)
-    slice_shape = tuple(volume_index_to_image(vol, chooserow).shape)
-    stored = [
-        _layer_xy_to_volume_point(
-            (4.0, 7.0),
-            chooserow,
-            slice_shape=slice_shape,
-            timestamp=1.0,
-        )
-    ]
-    xy = _volume_points_to_layer_xy(stored, chooserow, slice_shape=slice_shape)
-    assert xy.shape == (1, 2)
-    assert np.allclose(xy[0], [4.0, 7.0])
-
-
-def test_pair_status_messages() -> None:
-    assert "atlas point #2" in _pair_status(2, 1)
-    assert "sample point #2" in _pair_status(1, 2)
-    assert "matched" in _pair_status(3, 3)
 
 
 def _write_minimal_cord_checkpoint(tmp_path: Path) -> Path:
@@ -195,3 +175,128 @@ def test_paired_points_volume_yxz_zero_based() -> None:
     atlas_pts, sample_pts = session.paired_points_volume_yxz()
     assert np.allclose(sample_pts[0], [10.0, 20.0, 4.0])
     assert np.allclose(atlas_pts[0], [11.0, 21.0, 5.0])
+
+
+# --------------------------------------------------------------------------- MATLAB parity
+def test_chooselist_matches_matlab_randperm() -> None:
+    """Slot order = MATLAB rng(1); randperm(100) over round(linspace(1, N, 100))."""
+    cl = generate_cord_control_point_list(1893)
+    # MATLAB: slicescheck(randperm) for N = 1893 starts with slices 39, 1874, 727, 957, 269
+    assert cl[:5, 0].tolist() == [39, 1874, 727, 957, 269]
+    assert sorted(cl[:, 0].tolist()) == sorted(
+        np.floor(np.linspace(1, 1893, 100) + 0.5).astype(int).tolist()
+    )
+
+
+def test_matlab_round_halves_away_from_zero() -> None:
+    assert matlab_round(2.5) == 3
+    assert matlab_round(-2.5) == -3
+    assert matlab_round(3.49) == 3
+
+
+def test_fit_cord_alignment_branches() -> None:
+    session = ControlPointSession.empty(np.eye(4), n_slices=20)
+    matrix, status = fit_cord_alignment(session, None)
+    assert np.array_equal(matrix, np.eye(4)) and "Identity" in status
+    auto = np.diag([2.0, 2.0, 1.0, 1.0])
+    matrix, status = fit_cord_alignment(session, auto)
+    assert np.array_equal(matrix, auto) and "auto-alignment" in status
+    # 16 pairs from a known affine on [x y z 1] (MATLAB tform.A) are recovered exactly
+    true = np.array(
+        [[1.1, 0.05, 0.0, 3.0], [-0.02, 0.95, 0.01, -2.0], [0.0, 0.03, 1.2, 5.0], [0, 0, 0, 1]]
+    )
+    rng = np.random.default_rng(0)
+    for i in range(16):
+        xyz = rng.uniform(1, 100, 3)
+        x_s, y_s, z_s = (true @ np.r_[xyz, 1.0])[:3]
+        session.atlas_control_points[i] = [[xyz[1], xyz[0], xyz[2], float(i)]]  # [row col z t]
+        session.histology_control_points[i] = [[y_s, x_s, z_s, float(i)]]
+    matrix, status = fit_cord_alignment(session, auto)
+    assert np.allclose(matrix, true, atol=1e-9)
+    assert status == "Current Fit: MSE: 0.00 | Npoints: 16"
+
+
+def test_atlas_plane_rules() -> None:
+    # identity: the atlas plane is the sample slice
+    assert auto_atlas_plane(np.eye(4), (126, 161), 500) == 500
+    shift = np.eye(4)
+    shift[2, 3] = 10.0  # atlas -> sample shifts z by +10, so the atlas plane is 10 lower
+    assert auto_atlas_plane(shift, (126, 161), 500) == 490
+    assert auto_atlas_plane(shift, (126, 161), 3) == 1  # MATLAB max(sluse, 1)
+    # atlas points on the slice win; their median is rounded half away from zero
+    assert atlas_plane_for_slice([[1, 1, 10, 0], [1, 1, 11, 0]], shift, (126, 161), 500) == 11
+
+
+def test_boundary_mask_matches_conv2_rule() -> None:
+    lab = np.zeros((7, 7))
+    lab[2:5, 2:5] = 9.0
+    mask = boundary_mask(lab)
+    assert mask[3, 3] == False  # noqa: E712  (interior: mean of 9s is 9)
+    assert mask[2, 2] and mask[1, 1]  # edges on both sides of the label border
+    assert mask[0, 0] == False  # noqa: E712  (zero padding keeps background 0)
+
+
+def test_warped_annotation_plane_identity_is_slice() -> None:
+    av = np.random.default_rng(1).integers(0, 50, size=(6, 7, 5)).astype(np.uint16)
+    assert np.array_equal(warped_annotation_plane(av, np.eye(4), 3), av[:, :, 2])
+
+
+def test_delete_last_point_uses_timestamps_like_matlab() -> None:
+    hist = [[1, 1, 1, 5.0]]
+    atlas = [[1, 1, 1, 6.0]]
+    assert delete_last_point(hist, atlas) and atlas == [] and len(hist) == 1
+    assert delete_last_point(hist, atlas) and hist == []
+    assert not delete_last_point(hist, atlas)
+    # NaN timestamps compare false (legacy files): nothing is removed when the atlas one is NaN
+    hist, atlas = [[1, 1, 1, 5.0]], [[1, 1, 1, float("nan")]]
+    assert not delete_last_point(hist, atlas) and len(hist) == 1 and len(atlas) == 1
+
+
+def test_legacy_python_session_is_converted_to_matlab_convention(tmp_path: Path) -> None:
+    from lightsuite.gui.cord_data import CORD_POINT_COORDS_MATLAB, load_cord_session
+
+    session = ControlPointSession.empty(np.eye(4), n_slices=2)
+    session.histology_control_points[0] = [[10.0, 20.0, 5.0, 1.7e9]]  # 0-based in-plane, Unix time
+    session.atlas_control_points[0] = [[11.0, 21.0, 6.0, 1.7e9 + 1]]
+    session.point_coord_source = "napari"
+    path = tmp_path / "corresponding_points.json"
+    session.save(path)
+    loaded = load_cord_session(path)
+    h, a = loaded.histology_control_points[0][0], loaded.atlas_control_points[0][0]
+    assert h[:3] == [11.0, 21.0, 5.0] and a[:3] == [12.0, 22.0, 6.0]
+    assert 7e5 < h[3] < 8e5 and a[3] > h[3]  # MATLAB datenum, order kept
+    assert loaded.point_coord_source == CORD_POINT_COORDS_MATLAB
+    # converting again is a no-op
+    loaded.save(path)
+    again = load_cord_session(path)
+    assert again.histology_control_points[0][0][:3] == [11.0, 21.0, 5.0]
+
+
+def test_slots_are_remapped_by_slice_when_order_changes() -> None:
+    from lightsuite.gui.cord_data import remap_cord_session_slots
+
+    new = generate_cord_control_point_list(1893)
+    old = new[::-1].copy()
+    session = ControlPointSession.empty(np.eye(4), n_slices=100)
+    session.chooselist = old.tolist()
+    session.histology_control_points[0] = [[5.0, 6.0, float(old[0, 0]), 1.0]]
+    assert remap_cord_session_slots(session, new)
+    j = int(np.flatnonzero(new[:, 0] == old[0, 0])[0])
+    assert session.histology_control_points[j][0][2] == old[0, 0]
+    assert sum(len(p) for p in session.histology_control_points) == 1
+
+
+def test_match_points_atlas_warp_is_cached(tmp_path: Path, monkeypatch) -> None:
+    import lightsuite.gui.cord_data as cord_data
+
+    config_path = _write_minimal_cord_checkpoint(tmp_path)
+    cfg = load_spinal_config(config_path)
+    first = load_cord_match_points_data(cfg)
+
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("atlas was re-warped although the cache is valid")
+
+    monkeypatch.setattr(cord_data, "warp_cord_atlas_to_straightvol", _fail)
+    second = load_cord_match_points_data(cfg)
+    assert np.array_equal(first.atlas_annotation, second.atlas_annotation)
+    assert np.array_equal(first.atlas_template, second.atlas_template)

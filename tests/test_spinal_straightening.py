@@ -9,14 +9,21 @@ import numpy as np
 
 from lightsuite.gui.straighten_cord import (
     clear_all_alignment_points,
+    delete_nearest_point,
     fit_overlay_geometry,
+    largest_gap_slice,
     pop_last_alignment_edit,
 )
 from lightsuite.registration.straightening import (
     compute_straightening_transforms,
     transform_cord_images_slices,
+    transform_cord_points_slices,
 )
-from lightsuite.registration.straightening_optimizer import run_straightening_optimizer, solve_spline, unwrap_sparse
+from lightsuite.registration.straightening_optimizer import (
+    run_straightening_optimizer,
+    solve_spline,
+    unwrap_sparse,
+)
 from lightsuite.validation.spinal_parity import compare_alignment_optimizer
 
 
@@ -121,3 +128,42 @@ def test_clear_all_and_undo_last_point() -> None:
     clear_all_alignment_points(user_cen, user_ant, user_pos)
     assert np.all(np.isnan(user_cen))
     assert np.all(np.isnan(user_ant))
+
+
+def test_straightened_image_and_points_share_one_grid() -> None:
+    """A bright voxel and the point marking it must land on the same straightened pixel.
+
+    Clicks and points use MATLAB's 1-based [x, y]; images are 0-based arrays.
+    """
+    cordvol = np.zeros((60, 70, 1), dtype=np.uint16)
+    row0, col0 = 22, 41
+    cordvol[row0, col0, 0] = 1000
+    tforms = compute_straightening_transforms(
+        np.array([35.0]), np.array([28.0]), np.array([0.7]), target_center=(30.0, 25.0)
+    )
+    straight = transform_cord_images_slices(cordvol, tforms, output_size=(50, 60), fill_value=0.0)
+    peak = np.unravel_index(np.argmax(straight[:, :, 0]), straight.shape[:2])
+    pt = transform_cord_points_slices(np.array([[col0 + 1.0, row0 + 1.0, 1.0]]), tforms)
+    assert abs((pt[0, 1] - 1.0) - peak[0]) < 0.75
+    assert abs((pt[0, 0] - 1.0) - peak[1]) < 0.75
+
+
+def test_delete_nearest_point() -> None:
+    arrays = {
+        "cen": np.array([[10.0, 10.0]]),
+        "ant": np.array([[30.0, 10.0]]),
+        "pos": np.array([[np.nan, np.nan]]),
+    }
+    assert delete_nearest_point(arrays, 0, (28.0, 11.0)) == "ant"
+    assert np.isnan(arrays["ant"][0, 0])
+    assert not np.isnan(arrays["cen"][0, 0])
+    assert delete_nearest_point(arrays, 0, (200.0, 200.0)) is None
+
+
+def test_largest_gap_slice() -> None:
+    has = np.zeros(100, dtype=bool)
+    assert largest_gap_slice(has, 0) == 50
+    has[[10, 20]] = True
+    assert largest_gap_slice(has, 0) == 99
+    has[99] = True
+    assert largest_gap_slice(has, 0) == 59

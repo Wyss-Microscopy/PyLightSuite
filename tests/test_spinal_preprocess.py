@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 import tifffile
 import yaml
@@ -99,3 +100,15 @@ def test_spinal_preprocess_requires_orientation(tmp_path: Path) -> None:
     result = preprocess_spinal_cord_sample(cfg, headless=True)
     assert (Path(result.checkpoint.lsfolder) / "regopts.json").is_file()
     assert result.checkpoint.tofliprc is True
+
+
+def test_matlab_imbinarize_separates_cord_from_background() -> None:
+    """Otsu on the uint16 class range (MATLAB imbinarize), not '> 0' after filling zeros."""
+    from lightsuite.preprocess.cord import matlab_imbinarize
+
+    rng = np.random.default_rng(0)
+    vol = rng.normal(600, 30, size=(40, 40, 10)).clip(1).astype(np.uint16)
+    vol[10:30, 12:28, :] = rng.normal(3000, 200, size=(20, 16, 10)).astype(np.uint16)
+    mask = matlab_imbinarize(vol)
+    assert mask[10:30, 12:28, :].mean() > 0.99
+    assert mask[:5, :5, :].mean() < 0.01

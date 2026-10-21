@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from lightsuite.analysis.cord_counts import assign_segment_names
 from lightsuite.analysis.cord_ontology import CordRegionTable
@@ -48,7 +49,9 @@ def _region_table() -> CordRegionTable:
             "division": ["GM", "GM"],
         }
     )
-    return CordRegionTable(atlas="fiederling", df=df, source_csv=__import__("pathlib").Path("x.csv"))
+    return CordRegionTable(
+        atlas="fiederling", df=df, source_csv=__import__("pathlib").Path("x.csv")
+    )
 
 
 def test_parcellate_cord_intensities_median_and_volume() -> None:
@@ -109,3 +112,44 @@ def test_parcellate_skips_background_regions() -> None:
 def test_assign_segment_names_matches_parcellation() -> None:
     names = assign_segment_names(np.array([1, 2, 3, 4]), _segments())
     assert names.tolist() == ["C1", "C1", "C2", "C2"]
+
+
+def test_grouped_stats_match_pandas() -> None:
+    """Sort-based group stats equal pandas median/mean/count and np.std(ddof=0)."""
+    from lightsuite.analysis.cord_parcellation import _grouped_stats
+
+    rng = np.random.default_rng(3)
+    for values in (
+        rng.integers(0, 5000, 4000).astype(np.float64),  # integral fast path
+        rng.normal(100.0, 20.0, 4000),  # general lexsort path
+    ):
+        keys = rng.integers(0, 37, values.size)
+        got = _grouped_stats(keys, values)
+        ref = pd.DataFrame({"k": keys, "v": values}).groupby("k")["v"]
+        np.testing.assert_array_equal(got["key"], ref.median().index.to_numpy())
+        np.testing.assert_array_equal(got["median"], ref.median().to_numpy())
+        np.testing.assert_array_equal(got["n"], ref.count().to_numpy())
+        np.testing.assert_allclose(got["mean"], ref.mean().to_numpy(), rtol=1e-13)
+        np.testing.assert_allclose(
+            got["std"], ref.apply(lambda s: np.std(s.to_numpy(), ddof=0)).to_numpy(), rtol=1e-12
+        )
+
+
+def test_parcellation_skips_nan_voxels_for_every_metric() -> None:
+    annotation = np.ones((4, 4, 3), dtype=np.int32)
+    volume = np.arange(48, dtype=np.float64).reshape(4, 4, 3)
+    volume[0, 0, :] = np.nan
+    segments = pd.DataFrame({"Segment": ["C1"], "Start": [1], "End": [3]})
+    tidy = parcellate_cord_intensities(
+        volume,
+        annotation,
+        segments,
+        sample="s",
+        channel=1,
+        intensity_metrics=["median_intensity", "std", "volume_mm3"],
+    )
+    metrics = set(tidy["metric"])
+    assert {"median_intensity", "std", "volume_mm3"} <= metrics
+    finite = volume[np.isfinite(volume)]
+    std = float(tidy.loc[tidy["metric"] == "std", "value"].iloc[0])
+    assert std == pytest.approx(np.std(finite))
