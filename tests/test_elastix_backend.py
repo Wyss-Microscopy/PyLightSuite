@@ -266,3 +266,24 @@ def test_caller_threads_keep_running_during_registration(registered: dict, tmp_p
         ticker.join()
     elapsed = time.perf_counter() - started
     assert ticks > 0.3 * elapsed / 0.01
+
+
+def test_forward_bspline_points_follow_transform_axes(tmp_path: Path) -> None:
+    """Points move by the transform's physical (x, y, z) shift, in volume (y, x, z) order."""
+    from lightsuite.import_.transform import apply_forward_bspline_to_points
+
+    transform = tmp_path / "bspline_atlas_to_samp_20um.txt"
+    transform.write_text(
+        '(Transform "TranslationTransform")\n(NumberOfParameters 3)\n'
+        "(TransformParameters 0.1 -0.04 0.02)\n"
+        '(InitialTransformParameterFileName "NoInitialTransform")\n'
+        '(HowToCombineTransforms "Compose")\n(FixedImageDimension 3)\n(MovingImageDimension 3)\n'
+        '(FixedInternalImagePixelType "float")\n(MovingInternalImagePixelType "float")\n'
+        "(Size 50 40 30)\n(Index 0 0 0)\n(Spacing 0.02 0.02 0.02)\n(Origin 0 0 0)\n"
+        "(Direction 1 0 0 0 1 0 0 0 1)\n(UseDirectionCosines \"false\")\n",
+        encoding="utf-8",
+    )
+    points_yxz = np.array([[10.0, 12.0, 5.0], [0.0, 0.0, 0.0]])
+    out = apply_forward_bspline_to_points(points_yxz, transform, temp_dir=tmp_path / "pts")
+    # x += 0.1 mm = 5 voxels, y -= 0.04 mm = 2 voxels, z += 0.02 mm = 1 voxel
+    np.testing.assert_allclose(out, points_yxz + np.array([-2.0, 5.0, 1.0]), atol=1e-5)

@@ -7,12 +7,12 @@ from pathlib import Path
 import numpy as np
 
 from lightsuite.gui.affine import transform_points
-from lightsuite.import_.transform import interpolate_bspline_displacement
-from lightsuite.preprocess.cord_checkpoint import CordTransformParamsCheckpoint
-from lightsuite.registration.elastix.runner import (
-    run_transformix_deformation_field,
-    run_transformix_points,
+from lightsuite.import_.transform import (
+    apply_forward_bspline_to_points,
+    forward_bspline_transform_path,
 )
+from lightsuite.preprocess.cord_checkpoint import CordTransformParamsCheckpoint
+from lightsuite.registration.elastix.runner import run_transformix_points
 from lightsuite.registration.straightening import transform_cord_points_slices
 
 
@@ -170,8 +170,8 @@ def transform_points_to_cord_atlas(
 ) -> np.ndarray:
     """Transform native sample-space points to 1-based Fiederling atlas ``x,y,z`` indices.
 
-    Chain: straighten → B-spline displacement → transformix(forward elastix) →
-    ``inv(transinit)`` → optional rostrocaudal flip → native upsample.
+    Chain: straighten → forward B-spline (transformix) → forward elastix affine
+    (transformix) → ``inv(transinit)`` → optional rostrocaudal flip → native upsample.
 
     Volume export resamples with the *inverse* elastix file (``output(x)=input(T(x))``).
     Feature points must be pushed with the *forward* elastix transform so they land
@@ -190,14 +190,14 @@ def transform_points_to_cord_atlas(
     if straight_yxz.size == 0:
         return straight_yxz.reshape(0, 3)
 
-    bspline_path = Path(transform_params.tform_bspline_samp20um_to_atlas_20um_px)
-    displacement = run_transformix_deformation_field(
-        transform_path=bspline_path,
-        output_dir=temp_dir / "deformation_field",
+    forward = forward_bspline_transform_path(
+        Path(transform_params.tform_bspline_samp20um_to_atlas_20um_px)
     )
-    regsize_mm = float(transform_params.registrationres_um[0]) * 1e-3
-    displacement_vox = displacement / regsize_mm
-    warped_yxz = straight_yxz + interpolate_bspline_displacement(straight_yxz, displacement_vox)
+    warped_yxz = apply_forward_bspline_to_points(
+        straight_yxz,
+        forward,
+        temp_dir=temp_dir / "bspline_points",
+    )
 
     after_affine = run_transformix_points(
         points_yxz=warped_yxz,

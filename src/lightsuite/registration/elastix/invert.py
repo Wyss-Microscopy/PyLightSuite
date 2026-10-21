@@ -1,4 +1,4 @@
-"""Invert elastix transforms (invertElastixTransformCP.m port)."""
+"""Invert elastix transforms (matlab_elastix invertElastixTransformCP.m port)."""
 
 from __future__ import annotations
 
@@ -9,39 +9,42 @@ from pathlib import Path
 from lightsuite.registration.elastix import backend
 from lightsuite.registration.elastix.mhd import read_mhd_spacing
 
-GENTLE_PARAMETER_FILE = "inversion_parameters_gentle.txt"
+INVERSION_PARAMETER_FILE = "inversion_parameters.txt"
+# invertElastixTransformCP iterfac: iterations = forward final level x this factor.
+INVERSION_ITERATION_FACTOR = 1.5
+# Components elastix creates once per metric; the inversion has a single metric.
+_PER_METRIC_KEYS = ("FixedImagePyramid", "MovingImagePyramid", "ImageSampler", "Interpolator")
 
 
 def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None) -> Path:
-    """Invert forward elastix B-spline transform; return inverted TransformParameters path."""
+    """Invert a forward elastix B-spline transform; return the inverse TransformParameters.
+
+    Follows matlab_elastix ``invertElastixTransformCP`` (2026-09): register the forward
+    fixed image to itself, starting from the forward transform, with
+    ``DisplacementMagnitudePenalty`` (which drives T(x) towards x) at the finest pyramid
+    level only. No image metric and no landmarks are used.
+    """
     transform_dir = transform_dir.expanduser()
     if output_dir is None:
         output_dir = transform_dir.parent / "elastix_inverse_temp"
     output_dir = output_dir.expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
-    # A failed earlier run leaves these behind; callers read the gentle file as
-    # "this run fell back to the gentle schedule".
     _clear_inversion_workspace(output_dir)
-    (output_dir / GENTLE_PARAMETER_FILE).unlink(missing_ok=True)
 
     fixed_mhd, param_paths = _forward_run_inputs(transform_dir)
-
     coef_files = sorted(transform_dir.glob("TransformParameters.*.txt"), reverse=True)
     if not coef_files:
         msg = f"No TransformParameters.*.txt in {transform_dir}"
         raise FileNotFoundError(msg)
 
-    fixpath = transform_dir / "fixed.txt"
-    movpath = transform_dir / "moving.txt"
-    landmark_paths = (
-        (fixpath, movpath)
-        if fixpath.is_file() and movpath.is_file()
-        else None
+    param_path = output_dir / INVERSION_PARAMETER_FILE
+    param_path.write_text(
+        build_inversion_parameters(param_paths[0].read_text(encoding="utf-8", errors="replace")),
+        encoding="utf-8",
     )
 
-    forward_param = param_paths[0]
-    # Multithreaded elastix sums partial results in a load-dependent order, so a run that
-    # diverges once (seen on a busy machine) usually converges when repeated.
+    # Multithreaded elastix sums partial results in a load-dependent order; repeat once
+    # before giving up.
     for attempt in range(2):
         if attempt:
             _clear_inversion_workspace(output_dir)
@@ -49,32 +52,73 @@ def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None
             fixed_mhd=fixed_mhd,
             output_dir=output_dir,
             coef_path=coef_files[0],
-            param_path=forward_param,
-            landmark_paths=landmark_paths,
+            param_path=param_path,
         )
         if inverted is not None:
             return _finalize_inverted_transform(inverted)
+    msg = f"elastix inversion failed twice in {output_dir}. See elastix.log in that directory."
+    raise RuntimeError(msg)
 
-    gentle_param = _build_gentle_inversion_parameter_file(
-        forward_param,
-        output_dir / GENTLE_PARAMETER_FILE,
-    )
-    _clear_inversion_workspace(output_dir)
-    inverted = _run_inversion_attempt(
-        fixed_mhd=fixed_mhd,
-        output_dir=output_dir,
-        coef_path=coef_files[0],
-        param_path=gentle_param,
-        landmark_paths=landmark_paths,
-    )
-    if inverted is None:
-        msg = (
-            f"elastix inversion failed with the forward (twice) and gentle schedules in "
-            f"{output_dir}. "
-            "See elastix.log in that directory."
-        )
-        raise RuntimeError(msg)
-    return _finalize_inverted_transform(inverted)
+
+def build_inversion_parameters(
+    forward_text: str,
+    *,
+    iteration_factor: float = INVERSION_ITERATION_FACTOR,
+) -> str:
+    """Inversion parameter file from the forward one (invertElastixTransformCP edits).
+
+    MATLAB edits: ``Registration`` -> MultiResolutionRegistration, ``Metric`` ->
+    DisplacementMagnitudePenalty, ``NumberOfResolutions`` -> 1,
+    ``ImagePyramidSchedule`` -> its last (finest) level, ``MaximumNumberOfIterations`` ->
+    last level x 1.5. Everything else (grid spacing, sampler, sample region, optimizer
+    settings) is kept from the forward run, as in MATLAB. Python additionally keeps only
+    the first entry of per-metric component lists (MATLAB's forward runs never have them)
+    and skips writing the result image, which only costs time.
+    """
+    params = read_parameter_text(forward_text)
+    dim = int(_first_number(params.get("FixedImageDimension"), default=3))
+
+    params["Registration"] = ['"MultiResolutionRegistration"']
+    params["Metric"] = ['"DisplacementMagnitudePenalty"']
+    for key in list(params):
+        if re.fullmatch(r"Metric\d+Weight", key):
+            del params[key]
+    for key in _PER_METRIC_KEYS:
+        if key in params and len(params[key]) > 1:
+            params[key] = params[key][:1]
+
+    params["NumberOfResolutions"] = ["1"]
+    schedule = params.get("ImagePyramidSchedule")
+    params["ImagePyramidSchedule"] = schedule[-dim:] if schedule else ["1"] * dim
+    iterations = params.get("MaximumNumberOfIterations") or ["2000"]
+    params["MaximumNumberOfIterations"] = [str(round(float(iterations[-1]) * iteration_factor))]
+    params["WriteResultImage"] = ['"false"']
+    return format_parameter_text(params)
+
+
+def read_parameter_text(text: str) -> dict[str, list[str]]:
+    """Parse an elastix parameter file into ``{key: [raw tokens]}`` (quotes kept)."""
+    params: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        line = line.split("//", 1)[0].strip()
+        match = re.fullmatch(r"\(\s*(\w+)\s*(.*?)\s*\)", line)
+        if match is None:
+            continue
+        params[match.group(1)] = re.findall(r'"[^"]*"|[^\s"]+', match.group(2))
+    return params
+
+
+def format_parameter_text(params: dict[str, list[str]]) -> str:
+    return "\n".join(f"({key} {' '.join(values)})" for key, values in params.items()) + "\n"
+
+
+def _first_number(values: list[str] | None, *, default: float) -> float:
+    if not values:
+        return default
+    try:
+        return float(values[0].strip('"'))
+    except ValueError:
+        return default
 
 
 def _finalize_inverted_transform(inverted_path: Path) -> Path:
@@ -89,13 +133,8 @@ def _run_inversion_attempt(
     output_dir: Path,
     coef_path: Path,
     param_path: Path,
-    landmark_paths: tuple[Path, Path] | None,
 ) -> Path | None:
-    """Run one inversion attempt; return TransformParameters path or None on failure.
-
-    MATLAB invertElastixTransformCP registers the fixed image to itself (one image for
-    all metrics), starting from the forward transform.
-    """
+    """Run one inversion attempt; return TransformParameters path or None on failure."""
     _ = read_mhd_spacing(fixed_mhd)
     try:
         inverted = backend.elastix(
@@ -104,8 +143,6 @@ def _run_inversion_attempt(
             parameter_files=param_path,
             output_dir=output_dir,
             initial_transform=coef_path,
-            fixed_points=landmark_paths[0] if landmark_paths is not None else None,
-            moving_points=landmark_paths[1] if landmark_paths is not None else None,
         )
     except backend.ElastixError:
         return None
@@ -134,51 +171,6 @@ def _forward_run_inputs(transform_dir: Path) -> tuple[Path, list[Path]]:
         msg = f"Could not parse parameter file paths from {log_path}"
         raise RuntimeError(msg)
     return fixed_mhd, param_paths
-
-
-def _build_gentle_inversion_parameter_file(forward_param: Path, destination: Path) -> Path:
-    """Single-resolution schedule for inversion when the forward multistep run diverges."""
-    text = forward_param.read_text(encoding="utf-8", errors="replace")
-    n_metrics = _count_forward_metrics(text)
-    sample_triple = _last_sample_region_triple(text)
-    pyramid = " ".join(["1"] * 3 * n_metrics)
-    sample_region = " ".join(sample_triple for _ in range(n_metrics))
-
-    text = _replace_elastix_param_line(text, "NumberOfResolutions", "1")
-    text = _replace_elastix_param_line(text, "ImagePyramidSchedule", pyramid)
-    text = _replace_elastix_param_line(text, "MaximumNumberOfIterations", "500")
-    text = _replace_elastix_param_line(text, "SampleRegionSize", sample_region)
-    text = _replace_elastix_param_line(text, "SP_a", "200")
-    text = _replace_elastix_param_line(text, "SP_alpha", "0.6")
-    destination = destination.expanduser()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(text, encoding="utf-8")
-    return destination
-
-
-def _count_forward_metrics(text: str) -> int:
-    n_mi = text.count("AdvancedMattesMutualInformation")
-    n_landmark = text.count("CorrespondingPointsEuclideanDistanceMetric")
-    if n_mi == 0 and n_landmark == 0:
-        return 1
-    return max(n_mi + n_landmark, 1)
-
-
-def _replace_elastix_param_line(text: str, key: str, value: str) -> str:
-    """Replace one elastix parameter with a numeric / space-separated value list."""
-    pat = re.compile(rf"^\s*\(\s*{re.escape(key)}\s+[^\)]*\)\s*$", re.MULTILINE | re.IGNORECASE)
-    text = pat.sub("", text)
-    return text.rstrip() + f"\n({key} {value})\n"
-
-
-def _last_sample_region_triple(text: str) -> str:
-    match = re.search(r"\(\s*SampleRegionSize\s+([^\)]+)\)", text, flags=re.IGNORECASE)
-    if not match:
-        return "2 2 2"
-    values = [float(v) for v in match.group(1).split()]
-    if len(values) >= 3:
-        return " ".join(f"{v:g}" for v in values[-3:])
-    return "2 2 2"
 
 
 def _clear_inversion_workspace(output_dir: Path) -> None:

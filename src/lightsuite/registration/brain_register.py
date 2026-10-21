@@ -60,7 +60,6 @@ from lightsuite.registration.correspondence_affine import (
 )
 from lightsuite.registration.elastix.backend import require_elastix
 from lightsuite.registration.elastix.invert import (
-    GENTLE_PARAMETER_FILE,
     invert_elastix_transform,
     write_inverted_transform_copy,
 )
@@ -638,11 +637,6 @@ def run_brain_registration(config: BrainPipelineConfig, *, use_multistep: bool =
     emit_pipeline_message("Register: inverting B-spline transform…")
     inverse_dir = brain_work_dir(save_path, ELASTIX_INVERSE_TEMP)
     inverted = invert_elastix_transform(elastix_temp, inverse_dir)
-    if (inverse_dir / GENTLE_PARAMETER_FILE).is_file():
-        console.print(
-            "[yellow]B-spline inversion:[/yellow] used gentle single-resolution schedule "
-            "(full multistep inversion diverged at high resolution)."
-        )
     samp_to_atlas_path = save_path / "bspline_samp_to_atlas_20um.txt"
     write_inverted_transform_copy(inverted, samp_to_atlas_path)
 

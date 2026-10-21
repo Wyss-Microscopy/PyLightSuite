@@ -24,11 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applying existing transforms gives identical results; new registrations differ from 5.1
   by a few µm (more for inverse B-splines in poorly constrained regions).
   `lightsuite doctor` checks for `itk-elastix` instead of the binaries.
-- B-spline inversion retries the full schedule once before falling back to the gentle
-  schedule, and no longer reports a gentle fallback left over from an earlier failed run.
+- B-spline inversion now matches matlab_elastix `invertElastixTransformCP` (2026-09):
+  `DisplacementMagnitudePenalty` only, finest pyramid level only, 1.5x the forward run's
+  final iterations, no landmarks. Previously Python re-ran the forward metrics (mutual
+  information, landmarks, bending energy) over all levels, which inverted less accurately
+  and could diverge. The "gentle" fallback schedule is gone; a failed inversion is
+  retried once.
 
 ### Fixed
 
+- Brain and spinal cord point import (`import-annotations`) mapped points through the
+  inverse B-spline with the x and y displacement components swapped, misplacing cells by up
+  to hundreds of µm (on one brain, a third of the cells landed outside the brain). Points
+  are now pushed through the forward B-spline with transformix, which is exact; MATLAB's
+  `transformPointsToAtlas` uses a first-order approximation instead (median error ~19 µm
+  on the deposited TRAP2 brains). Registered volumes and intensity tables were not affected.
 - Docs: brain QC previews are written directly in `qc/`, not in `qc/initial/`, `qc/affine/`
   and `qc/bspline/`.
 
