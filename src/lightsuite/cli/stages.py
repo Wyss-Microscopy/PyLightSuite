@@ -199,7 +199,7 @@ def spinal_stage_specs(config: SpinalCordPipelineConfig) -> list[StageSpec]:
         StageSpec(
             "match-points",
             "Match control points",
-            "atlas2histology_tform.json",
+            "corresponding_points.json",
             optional=True,
             manual=True,
         ),

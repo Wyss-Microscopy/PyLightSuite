@@ -116,11 +116,17 @@ Trace the cord so it can be straightened along its length.
 uv run lightsuite spinal straighten -c my_spinal.yaml
 ```
 
-1. Select the **center**, **anterior** or **posterior** layer in Napari's layer list, then click on the slice to place that point: the central canal, then the anterior and posterior edges.
-2. Move through slices with the slider, **←/→**, **PgUp/PgDn** or the mouse wheel. Annotate slices spread along the whole cord.
-3. From two annotated slices on, a fit preview appears (yellow axis, cyan centre, green/red predicted edges). Toggle it with **P**.
-4. **Clear last** undoes the last point, **Clear all** removes everything.
-5. Save with **S** (or **Save (s)**).
+The window has the same layout and controls as MATLAB's `spinal_cord_aligner`: the current slice on the left, and the fitted position and angle against slice number on the right (click either plot to jump to that slice).
+
+1. Click on the slice to place points; no layer selection is needed:
+    - **left click**: anterior edge (green),
+    - **right click**: posterior edge (red),
+    - **middle click**: central canal (blue).
+2. Change slice with the mouse wheel or **←/→** (**PgUp/PgDn** jumps 10 slices). **Space** jumps to the largest gap between annotated slices. Annotate slices spread along the whole cord.
+3. **p** shows or hides the fit (yellow axis, cyan centre, green/red ends). **l** sets the regularisation.
+4. **c** clears the slice, **x** deletes the point nearest the cursor.
+5. **Ctrl+scroll** zooms around the cursor, **r** or **Home** resets the view.
+6. **s** saves and keeps the window open; **Save & close** in the side panel saves and closes it.
 
 ### 4. Align longitudinal (GUI)
 
@@ -146,7 +152,16 @@ Applies the straightening and a coarse affine alignment to the atlas.
 uv run lightsuite spinal match-points -c my_spinal.yaml
 ```
 
-Same controls as the [brain match-points stage](usage_lightsheet_brain.md#5-match-control-points-gui-optional).
+The window has the same layout and controls as MATLAB's `matchControlPoints_unified` (spine mode): the straightened sample slice on the left and the atlas warped onto the sample grid on the right. Maximum projections of both along the cord are shown below, with red/blue lines marking the current slices.
+
+1. **Click** on either slice to add a point. Pairs are numbered per slice.
+2. **←/→** change slice and **Enter** jumps to a slice. The mouse wheel moves the atlas plane by 2.
+3. **Backspace** deletes the last point, **c** clears the slice, **Space** toggles the atlas boundaries.
+4. Once 16 pairs exist, an affine is fitted and its atlas boundaries are drawn on the sample (the error is shown in the title).
+5. **Ctrl+scroll** zooms and **r** resets the view.
+6. **s** saves; closing the window asks whether to save.
+
+The 100 slices come in MATLAB's order. Points are saved to `corresponding_points.json` in the same layout as MATLAB's `corresponding_points.mat` (1-based `[row, col, slice, timestamp]`); sessions from older PyLightSuite versions are converted when loaded.
 
 ### 7. Register
 
