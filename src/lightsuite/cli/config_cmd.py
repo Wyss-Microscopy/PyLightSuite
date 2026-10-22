@@ -10,10 +10,8 @@ import yaml
 
 from lightsuite.config.loader import (
     load_config,
-    load_multires_config,
     load_spinal_config,
 )
-from lightsuite.config.workflow import is_multires_pipeline_config
 
 config_app = typer.Typer(help="Create and inspect pipeline YAML configs.")
 
@@ -41,7 +39,7 @@ def _write_yaml(path: Path, data: dict) -> None:
 def config_init(
     workflow: str = typer.Argument(
         ...,
-        help="Workflow template: brain, spinal, or multires.",
+        help="Workflow template: brain or spinal.",
     ),
     output: str = typer.Option(
         "my_sample.yaml",
@@ -105,28 +103,8 @@ def config_init(
             },
             "compute": {"workers": 4},
         }
-    elif workflow_key == "multires":
-        data = {
-            "sample": {
-                "name": _prompt_path("Sample name", "my_multires"),
-                "save_path": _prompt_path("Results directory"),
-                "scratch": _prompt_path("Scratch directory"),
-            },
-            "multires": {
-                "pair_label": _prompt_path("Pair label", "overview_roi"),
-                "channels": {
-                    "488": {
-                        "overview": _prompt_path("Overview path (488)"),
-                        "roi": _prompt_path("ROI path (488)"),
-                    },
-                },
-                "registration": {
-                    "reference_channel": "488",
-                },
-            },
-        }
     else:
-        raise typer.BadParameter("workflow must be brain, spinal, or multires")
+        raise typer.BadParameter("workflow must be brain or spinal")
 
     _write_yaml(out, data)
     typer.echo(f"Wrote {out}")
@@ -140,20 +118,6 @@ def config_explain(
     """Print a human-readable summary of resolved paths and key settings."""
     path = Path(config).expanduser().resolve()
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if is_multires_pipeline_config(raw):
-        cfg = load_multires_config(path)
-        typer.echo(f"Workflow: multires  sample={cfg.sample.name!r}")
-        typer.echo(f"  save_path: {cfg.sample.save_path}")
-        typer.echo(f"  scratch:   {cfg.sample.scratch}")
-        typer.echo(f"  pair_label: {cfg.multires.pair_label}")
-        if cfg.multires.channels:
-            typer.echo(f"  channels: {', '.join(cfg.multires.channels)}")
-        if cfg.multires.pair_manifest:
-            typer.echo(f"  pair_manifest: {cfg.multires.pair_manifest}")
-        if _has_import_annotations(cfg):
-            typer.echo(f"  import annotations: {len(cfg.import_.annotations)} layer(s)")
-        return
-
     if "atlas" in raw and raw.get("atlas", {}).get("atlas_dir") and "provider" not in raw.get(
         "atlas", {}
     ):
@@ -181,14 +145,9 @@ def config_explain(
         typer.echo(f"  import annotations: {len(cfg.import_.annotations)} layer(s)")
 
 
-def _has_import_annotations(config) -> bool:
-    import_cfg = getattr(config, "import_", None)
-    return bool(import_cfg and import_cfg.annotations)
-
-
 @config_app.command("schema")
 def config_schema(
-    workflow: str = typer.Argument(..., help="brain, spinal, or multires."),
+    workflow: str = typer.Argument(..., help="brain or spinal."),
     output: str | None = typer.Option(
         None,
         "--output",
@@ -206,12 +165,8 @@ def config_schema(
         from lightsuite.config.models import SpinalCordPipelineConfig
 
         schema = SpinalCordPipelineConfig.model_json_schema()
-    elif workflow_key == "multires":
-        from lightsuite.multires.config_models import MultiresPipelineConfig
-
-        schema = MultiresPipelineConfig.model_json_schema()
     else:
-        raise typer.BadParameter("workflow must be brain, spinal, or multires")
+        raise typer.BadParameter("workflow must be brain or spinal")
 
     text = json.dumps(schema, indent=2)
     if output is None:

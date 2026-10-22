@@ -1,4 +1,4 @@
-"""Unified stage registry for brain, spinal, and multires workflows."""
+"""Unified stage registry for brain and spinal workflows."""
 
 from __future__ import annotations
 
@@ -14,12 +14,10 @@ from lightsuite.cli.stages import (
     StageStatus,
     brain_stage_specs,
     brain_stage_statuses,
-    multires_stage_specs,
-    multires_stage_statuses,
     spinal_stage_specs,
     spinal_stage_statuses,
 )
-from lightsuite.config.loader import load_config, load_multires_config, load_spinal_config
+from lightsuite.config.loader import load_config, load_spinal_config
 
 
 class StageKind(str, Enum):
@@ -119,12 +117,6 @@ def _spinal_convert_annotations(config: Any, ctx: StageContext) -> Any:
     return run_convert_annotations_for_pipeline(config)
 
 
-def _multires_convert_annotations(config: Any, ctx: StageContext) -> Any:
-    from lightsuite.import_.convert import run_convert_annotations_for_pipeline
-
-    return run_convert_annotations_for_pipeline(config)
-
-
 def _brain_view_registration(config: Any, ctx: StageContext) -> Any:
     from lightsuite.gui.view_registration_brain import run_brain_view_registration
 
@@ -203,49 +195,6 @@ def _spinal_plot_stats(config: Any, ctx: StageContext) -> Any:
     return run_spinal_stats_plots(config, headless=ctx.headless)
 
 
-def _multires_match_points(config: Any, ctx: StageContext) -> Any:
-    from lightsuite.gui.match_points_multires import run_multires_match_points
-
-    return run_multires_match_points(config, headless=ctx.headless)
-
-
-def _multires_inspect_geometry(config: Any, ctx: StageContext) -> Any:
-    from lightsuite.gui.inspect_geometry_multires import run_multires_inspect_geometry
-
-    return run_multires_inspect_geometry(
-        config,
-        config_path=ctx.config_path,
-        headless=ctx.headless,
-    )
-
-
-def _multires_check_geometry(config: Any, ctx: StageContext) -> Any:
-    from lightsuite.multires.runner import check_multires_geometry
-
-    return check_multires_geometry(
-        config,
-        level=config.multires.registration.geometry_check_level,
-    )
-
-
-def _multires_register(config: Any, ctx: StageContext) -> Any:
-    from lightsuite.multires.runner import run_multires_registration
-
-    return run_multires_registration(config)
-
-
-def _multires_inspect_registration(config: Any, ctx: StageContext) -> Any:
-    from lightsuite.gui.inspect_registration_multires import run_multires_inspect_registration
-
-    return run_multires_inspect_registration(config, headless=ctx.headless)
-
-
-def _multires_import_annotations(config: Any, ctx: StageContext) -> Any:
-    from lightsuite.multires.import_annotations import run_multires_import_annotations
-
-    return run_multires_import_annotations(config)
-
-
 def _brain_import_segmentation(config: Any, ctx: StageContext) -> Any:
     from lightsuite.import_.segmentation_pipeline import run_import_segmentation_brain
 
@@ -256,12 +205,6 @@ def _spinal_import_segmentation(config: Any, ctx: StageContext) -> Any:
     from lightsuite.import_.segmentation_pipeline import run_import_segmentation_spinal
 
     return run_import_segmentation_spinal(config)
-
-
-def _multires_import_segmentation(config: Any, ctx: StageContext) -> Any:
-    from lightsuite.import_.segmentation_pipeline import run_import_segmentation_multires
-
-    return run_import_segmentation_multires(config)
 
 
 _BRAIN_RUNNERS: dict[str, StageRunner] = {
@@ -296,16 +239,6 @@ _SPINAL_RUNNERS: dict[str, StageRunner] = {
     "plot-stats": _spinal_plot_stats,
 }
 
-_MULTIRES_RUNNERS: dict[str, StageRunner] = {
-    "inspect-geometry": _multires_inspect_geometry,
-    "match-points": _multires_match_points,
-    "check-geometry": _multires_check_geometry,
-    "register": _multires_register,
-    "inspect-registration": _multires_inspect_registration,
-    "import-segmentation": _multires_import_segmentation,
-    "convert-annotations": _multires_convert_annotations,
-    "import-annotations": _multires_import_annotations,
-}
 
 WORKFLOWS: dict[str, WorkflowSpec] = {
     "brain": WorkflowSpec(
@@ -321,13 +254,6 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
         stage_specs=spinal_stage_specs,
         stage_statuses=spinal_stage_statuses,
         runners=_SPINAL_RUNNERS,
-    ),
-    "multires": WorkflowSpec(
-        name="multires",
-        load_config=load_multires_config,
-        stage_specs=multires_stage_specs,
-        stage_statuses=multires_stage_statuses,
-        runners=_MULTIRES_RUNNERS,
     ),
 }
 

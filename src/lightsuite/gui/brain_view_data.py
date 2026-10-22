@@ -92,7 +92,6 @@ class BrainViewVolumes:
     mask_layers: dict[str, np.ndarray]
     resampled_roi_masks: dict[str, np.ndarray] = field(default_factory=dict)
     resampled_roi_points: dict[str, np.ndarray] = field(default_factory=dict)
-    multires_roi_channels: dict[str, np.ndarray] = field(default_factory=dict)
     channels_warped_on_the_fly: bool = False
     diagnostics: RegistrationDiagnostics | None = None
 
@@ -522,16 +521,11 @@ def load_brain_view_volumes(
     *,
     paths: BrainViewPaths | None = None,
     space: ViewSpace = "sample",
-    load_multires_roi: bool = True,
 ) -> BrainViewVolumes:
     """Load registration review layers for Napari."""
     paths = paths or discover_brain_view_paths(config, space=space)
     if paths.space == "sample":
-        return _load_brain_view_volumes_sample(
-            config,
-            paths=paths,
-            load_multires_roi=load_multires_roi,
-        )
+        return _load_brain_view_volumes_sample(config, paths=paths)
     return _load_brain_view_volumes_atlas(config, paths=paths)
 
 
@@ -542,7 +536,6 @@ def _load_brain_view_volumes_sample(
     config: BrainPipelineConfig,
     *,
     paths: BrainViewPaths,
-    load_multires_roi: bool = True,
 ) -> BrainViewVolumes:
     save_path = config.sample.save_path.expanduser()
     transform_params = _load_transform_params(save_path)
@@ -619,20 +612,6 @@ def _load_brain_view_volumes_sample(
         output_dir=paths.volume_registered_dir,
     )
 
-    from lightsuite.gui.brain_multires_link import load_multires_roi_channels_on_registration_grid
-
-    multires_roi_channels: dict[str, np.ndarray] = {}
-    if load_multires_roi and config.multires_link is not None:
-        regopts_path = save_path / "regopts.json"
-        if regopts_path.is_file():
-            regopts = RegOptsCheckpoint.load(regopts_path)
-            multires_roi_channels = load_multires_roi_channels_on_registration_grid(
-                config,
-                checkpoint=regopts,
-                transform_params=transform_params,
-                expected_shape=expected_shape,
-            )
-
     diagnostics: RegistrationDiagnostics | None = None
     if paths.diagnostics_path is not None and paths.diagnostics_path.is_file():
         diagnostics = RegistrationDiagnostics.load(paths.diagnostics_path)
@@ -648,7 +627,6 @@ def _load_brain_view_volumes_sample(
         mask_layers=mask_layers,
         resampled_roi_masks=resampled_masks,
         resampled_roi_points=resampled_points,
-        multires_roi_channels=multires_roi_channels,
         diagnostics=diagnostics,
     )
 

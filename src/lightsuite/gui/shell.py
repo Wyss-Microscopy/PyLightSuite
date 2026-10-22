@@ -50,8 +50,6 @@ _INTERACTIVE_LOADING_HINTS: dict[str, str] = {
     "match-points": "reading volumes and control-point session",
     "straighten": "reading volumes",
     "align-longitudinal": "reading volumes and correspondence",
-    "inspect-geometry": "reading multiresolution manifest",
-    "inspect-registration": "reading registered ROI volumes",
     "view-registration": "reading registered volumes and annotations",
     "plot-stats": "loading region stats tables",
 }
@@ -95,7 +93,6 @@ class LightsuiteShell:
     def __init__(self, *, config_path: Path | None = None) -> None:
         from qtpy.QtWidgets import (
             QCheckBox,
-            QComboBox,
             QHBoxLayout,
             QLabel,
             QListWidget,
@@ -127,7 +124,6 @@ class LightsuiteShell:
         self._QPushButton = QPushButton
         self._QLabel = QLabel
         self._QTextEdit = QTextEdit
-        self._QComboBox = QComboBox
         self._QCheckBox = QCheckBox
         self.project: PipelineProject | None = None
         self._workflow_preview: str | None = None
@@ -173,25 +169,11 @@ class LightsuiteShell:
         QPushButton = self._QPushButton
         QLabel = self._QLabel
         QTextEdit = self._QTextEdit
-        QComboBox = self._QComboBox
         QCheckBox = self._QCheckBox
         QListWidget = self._QListWidget
 
         panel = QWidget()
         layout = QVBoxLayout(panel)
-
-        self._channel_row = QWidget()
-        channel_layout = QHBoxLayout(self._channel_row)
-        channel_layout.setContentsMargins(0, 0, 0, 0)
-        self._channel_label = QLabel("Reference channel:")
-        self._channel_combo = QComboBox()
-        self._channel_apply_button = QPushButton("Apply")
-        self._channel_apply_button.clicked.connect(self._on_apply_reference_channel)
-        channel_layout.addWidget(self._channel_label)
-        channel_layout.addWidget(self._channel_combo, stretch=1)
-        channel_layout.addWidget(self._channel_apply_button)
-        self._channel_row.setVisible(False)
-        layout.addWidget(self._channel_row)
 
         self._optional_toggle = QPushButton("Hide optional")
         self._optional_toggle.clicked.connect(self._toggle_optional_stages)
@@ -250,9 +232,6 @@ class LightsuiteShell:
         self._optional_toggle.setEnabled(enabled)
         self._stage_list.setEnabled(enabled)
         self._action_button.setEnabled(enabled)
-        if self._channel_row.isVisible():
-            self._channel_combo.setEnabled(enabled)
-            self._channel_apply_button.setEnabled(enabled)
         if self._export_row.isVisible():
             self._export_atlas_check.setEnabled(enabled)
             self._export_sample_check.setEnabled(enabled)
@@ -379,33 +358,6 @@ class LightsuiteShell:
         height = row_height * visible_rows + frame + 2
         self._stage_list.setFixedHeight(height)
 
-    def _update_channel_selector(self) -> None:
-        if self.project is None or self.project.workflow != "multires":
-            self._channel_row.setVisible(False)
-            return
-        from lightsuite.multires.channels import (
-            multires_channel_names,
-            resolved_apply_transform_to,
-            resolved_reference_channel,
-        )
-
-        names = multires_channel_names(self.project.config)
-        if len(names) <= 1:
-            self._channel_row.setVisible(False)
-            return
-
-        ref = resolved_reference_channel(self.project.config) or names[0]
-        targets = resolved_apply_transform_to(self.project.config)
-        target_note = f" (apply to {', '.join(targets)})" if targets else ""
-        self._channel_label.setText(f"Reference channel{target_note}:")
-        self._channel_combo.blockSignals(True)
-        self._channel_combo.clear()
-        self._channel_combo.addItems(names)
-        ref_index = names.index(ref) if ref in names else 0
-        self._channel_combo.setCurrentIndex(ref_index)
-        self._channel_combo.blockSignals(False)
-        self._channel_row.setVisible(True)
-
     def _load_export_space_defaults(self) -> None:
         """Initialize export-space checkboxes from YAML (row stays hidden until export)."""
         if self.project is None or self.project.workflow not in {"brain", "spinal"}:
@@ -446,31 +398,6 @@ class LightsuiteShell:
             sample=self._export_sample_check.isChecked(),
         )
 
-    def _on_apply_reference_channel(self) -> None:
-        if self.project is None:
-            return
-        from lightsuite.config.loader import save_reference_channel_to_multires_config
-        from lightsuite.multires.channels import default_apply_transform_to
-
-        channel = self._channel_combo.currentText()
-        try:
-            save_reference_channel_to_multires_config(self.project.config_path, channel)
-        except (OSError, ValueError) as exc:
-            self.log(f"Could not update reference channel: {exc}")
-            return
-        self._teardown_active_stage()
-        workflow, config = load_project(self.project.config_path)
-        self.project = PipelineProject(
-            workflow=workflow,
-            config_path=self.project.config_path,
-            config=config,
-        )
-        self._update_channel_selector()
-        targets = default_apply_transform_to(config, channel)
-        target_note = f", apply transform to {', '.join(targets)}" if targets else ""
-        self.log(f"Co-registration reference channel set to {channel}{target_note}")
-        self.refresh_statuses()
-
     def log(self, text: str) -> None:
         self._log.append(_strip_rich_markup(text))
 
@@ -508,7 +435,6 @@ class LightsuiteShell:
         self._optional_toggle.setEnabled(True)
         self._stage_list.setEnabled(True)
         self._action_button.setEnabled(False)
-        self._channel_row.setVisible(False)
         self._update_export_row_visibility()
         self._update_action_button()
         self.log(
@@ -529,7 +455,6 @@ class LightsuiteShell:
         self.log(f"Loaded {workflow} config for sample '{config.sample.name}'")
         self._config_editor.load_from_path(path)
         self._set_actions_enabled(True)
-        self._update_channel_selector()
         self._load_export_space_defaults()
         self._update_export_row_visibility()
         self.refresh_statuses()

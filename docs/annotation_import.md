@@ -1,6 +1,6 @@
-# Annotation import (LightSuite Sample Space v1)
+# Annotation import
 
-Import cell coordinates or segmentation masks from **any** external tool into atlas space. All tools must export into a single native sample-space convention before running `import-annotations`.
+PyLightSuite has no built-in cell detection. Instead, run any detection or segmentation tool on the native-resolution data and import its cell coordinates or masks into atlas space. Every input is first converted to one convention, **LightSuite Sample Space v1** (LSS v1), described below.
 
 ---
 
@@ -17,9 +17,9 @@ flowchart LR
 
 1. **`lightsuite brain preprocess`** — writes `regopts.json` and **`sample_reference.json`** (native grid contract).
 2. **Segment** at **native resolution** on the same grid as the stitched sample (not the 20 µm registration preview TIFF).
-3. **Convert** tool output to `points.csv` or `mask.tif` (see below). Vendor-specific formats (Arivis, LCT, etc.) need a one-time local converter.
+3. **Convert** the tool output to `points.csv` or `mask.tif`: built-in converters exist for SmartSPIM, FIJI, Imaris and Arivis, and you can plug in your own (see [below](#converting-from-external-tools)).
 4. **`lightsuite brain register`** — produces `transform_params.json`.
-5. **`lightsuite brain import-annotations`** — warps annotations into atlas space.
+5. **`lightsuite brain import-annotations`** — warps annotations into atlas space and adds cell counts to the region tables.
 
 The **spinal cord** pipeline uses the same native `points.csv` / `mask.tif` contract. After
 `lightsuite spinal register`, run `lightsuite spinal import-annotations`. Cord preprocess
@@ -35,7 +35,7 @@ After preprocess, read `<save_path>/sample_reference.json`:
 ```json
 {
   "format": "lightsuite_sample_space_v1",
-  "sample_name": "Gilda",
+  "sample_name": "my_sample",
   "shape_yxz": [5834, 5690, 2052],
   "voxel_um": [2.03, 2.03, 3.0],
   "index_base": 1,
@@ -95,14 +95,14 @@ import:
   write_csv: true
   converter:
     suite: smartspim   # native | smartspim | fiji | imaris | arivis | custom
-    source: /data/Jules/cell_detection/488_points_Endogenous.json
-    output: /data/Jules/converted/smartspim_488_points.csv   # optional
+    source: /data/my_sample/cell_detection/488_points_Endogenous.json
+    output: /data/my_sample/converted/smartspim_488_points.csv   # optional
     label: smartspim_488
     # custom_entry: /path/to/my_converter.py   # required when suite: custom
     # voxel_um: [1.0, 1.0, 1.0]                # Imaris / FIJI calibration
   annotations:
     - format: points_csv
-      path: /data/Jules/converted/smartspim_488_points.csv
+      path: /data/my_sample/converted/smartspim_488_points.csv
       label: smartspim_488
 ```
 
@@ -129,7 +129,7 @@ uv run lightsuite brain import-annotations -c my_mouse.yaml
 
 ## Outputs
 
-Written to `<save_path>/volume_registered/`:
+Written to `<save_path>/imports/` (brain) or `<save_path>/volume_registered/` (spinal cord):
 
 | Kind | Files |
 |------|-------|
@@ -137,8 +137,7 @@ Written to `<save_path>/volume_registered/`:
 | Mask | `{label}_registered_atlas.tif`, `{label}_in_sample_20um.tif` |
 | Summary | `import_annotations_summary.json` |
 
-For spinal cord samples, run `lightsuite spinal region-stats` to bin imported points
-into Fiederling regions and rostrocaudal segments (`region_stats.csv`).
+Imported points are also counted per region: `cell_count` and `cell_density` rows are added to `stats/region_stats.csv` (turn off with `analysis.count_points: false`). For spinal cord samples, counts are per Fiederling region and rostrocaudal segment.
 
 NPZ arrays:
 
@@ -150,7 +149,7 @@ NPZ arrays:
 
 ## Converting from external tools
 
-Each site maintains a small converter script. Common translations:
+Built-in converters (`import.converter.suite`) and the manual translations for other tools:
 
 | Source | Conversion |
 |--------|------------|
@@ -184,27 +183,15 @@ Validate against `sample_reference.json` before import:
 
 ---
 
-## Multiresolution: segmenting on a higher-resolution ROI
-
-The spec above assumes annotations sit on the same native grid as the registered sample. When segmentation runs on a high-resolution ROI that was registered to a lower-resolution overview, use [`lightsuite multires import-annotations`](usage_multiresolution.md#step-9--optional--import-segmentation-from-the-roi) as a first stage:
-
-```
-ROI-native CSV/mask  ──multires import-annotations──▶  overview-native CSV/mask  ──brain import-annotations──▶  atlas
-```
-
-The multires stage reads 1-based **ROI** voxel indices and writes 1-based **overview** voxel indices in the exact formats documented here, so the two stages compose without any conversion step. Masks are warped with nearest-neighbour interpolation to preserve labels.
-
----
-
 ## Limitations
 
-- **Native resolution only** — registration-resolution (20 µm) masks/coordinates are not accepted.
-- **Allen cell-count parcellation** — atlas coordinates are written; per-region counts require MATLAB or external tooling.
+- **Native resolution only**: registration-resolution (20 µm) masks or coordinates are not accepted.
+- **Spinal cord**: only `points_csv` is supported; convert masks to points first.
 
 ---
 
 ## See also
 
-- [Brain lightsheet usage](usage_lightsheet_brain.md) — full pipeline and command cheat sheet
-- [Multiresolution registration](usage_multiresolution.md) — ROI → overview segmentation transfer
-- `examples/annotation_sample/` — minimal example CSV
+- [Brain lightsheet](usage_lightsheet_brain.md) and [Spinal cord](usage_spinal_cord.md) guides
+- [`examples/annotation_sample/`](../examples/annotation_sample/): a minimal `points.csv` and a custom converter template
+- [`examples/notebooks/`](../examples/notebooks/): notebooks converting Arivis, Imaris and SmartSPIM exports

@@ -1,39 +1,45 @@
-# LightSuite
+# PyLightSuite
 
-[![Documentation Status](https://readthedocs.org/projects/lightsuite/badge/?version=latest)](https://lightsuite.readthedocs.io/en/latest/)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11--3.12-blue.svg)](https://www.python.org/)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Upstream: LightSuite (MATLAB)](https://img.shields.io/badge/upstream-LightSuite%20(MATLAB)-orange.svg)](https://github.com/dimokaramanlis/LightSuite)
 
-**LightSuite** registers large microscopy volumes to standard anatomical atlases and exports atlas-space intensities, parcellation tables, and cell coordinates. The **Python pipeline** (`lightsuite` CLI) targets 100 GB+ lightsheet datasets and runs **without a MATLAB license**.
+**PyLightSuite is a Python port of [LightSuite](https://github.com/dimokaramanlis/LightSuite)**, the MATLAB framework by Karamanlis et al. for scalable atlas registration and cell detection across the central nervous system.
 
-Full documentation: [lightsuite.readthedocs.io](https://lightsuite.readthedocs.io/en/latest/)
+It registers large microscopy volumes to standard anatomical atlases and exports atlas-space intensities, parcellation tables, and cell coordinates. The Python pipeline (installed as the `lightsuite` package and CLI) targets 100 GB+ lightsheet datasets and runs **without a MATLAB license**.
+
+| | Link |
+|---|---|
+| **This repository (Python)** | [`docs/`](docs/index.md): installation, usage guides, configuration reference |
+| **Original MATLAB LightSuite** | [github.com/dimokaramanlis/LightSuite](https://github.com/dimokaramanlis/LightSuite) · [lightsuite.readthedocs.io](https://lightsuite.readthedocs.io/en/latest/) |
+
+> **Note:** `lightsuite.readthedocs.io` documents the **MATLAB** toolbox. Python usage is documented in this repository's [`docs/`](docs/index.md) folder.
 
 ---
 
-## What the Python tool does
+## What the Python port does
 
-LightSuite Python is a command-line pipeline with optional **Napari** GUIs for manual refinement. Configuration is YAML-based; stages are resumable via JSON checkpoints.
+PyLightSuite is a command-line pipeline with optional **Napari** GUIs for manual refinement. Configuration is YAML-based, and stages can be resumed from JSON checkpoints.
 
 | Workflow | CLI | Summary |
 |----------|-----|---------|
-| **Brain lightsheet** | `lightsuite brain` | Preprocess → orientation check → coarse alignment → control-point matching → B-spline registration (Elastix) → export registered volumes and regional intensity tables. Supports Allen CCF v3 and Perens LSFM atlases. |
+| **Brain lightsheet** | `lightsuite brain` | Preprocess → orientation check → coarse alignment → control-point matching → B-spline registration (Elastix) → export registered volumes and regional intensity tables. Supports the Allen CCF v3 and Perens LSFM atlases. |
 | **Spinal cord** | `lightsuite spinal` | Preprocess → straighten (central canal / A–P axis) → register to the Fiederling spinal atlas → export → per-sample region statistics and cord-specific plots. |
-| **Multiresolution** | `lightsuite multires` | Align a high-resolution ROI stack to a low-magnification overview (mesoSPIM, SmartSPIM, etc.) using vendor geometry and optional landmarks — no atlas required. |
 | **External annotations** | `lightsuite brain import-annotations` | Import spot lists (`points.csv`) or masks (TIFF) after registration and map them to atlas regions. |
 
-**Inputs:** multi-page TIFF stacks (channel-per-file or plane-per-file layouts).  
+**Inputs:** multi-page TIFF stacks (channel-per-file or plane-per-file layouts).
 **Outputs:** atlas-space registered volumes (multi-page TIFF), parcellation intensity CSVs, optional annotation transforms.
 
-Interactive stages (orientation, match-points, registration review) are available through `lightsuite gui -c config.yaml` or per-stage Napari tools.
+Interactive stages (orientation, match-points, registration review) are available through `lightsuite gui -c config.yaml` or the per-stage Napari tools.
 
 ---
 
 ## Quick start
+After full installation: 
 
 ```bash
-git clone https://github.com/dimokaramanlis/LightSuite.git
-cd LightSuite
-uv sync --extra dev --extra gui --extra registration
+cd PyLightSuite
+uv sync --extra dev --extra gui --extra atlas
 
 cp examples/brain_lightsheet.yaml my_sample.yaml
 # edit paths and voxel size
@@ -42,65 +48,77 @@ uv run lightsuite doctor -c my_sample.yaml
 uv run lightsuite brain run -c my_sample.yaml --through match-points
 ```
 
-Example configs: [`examples/README.md`](examples/README.md) (brain, spinal cord, multiresolution).
+Example configs are indexed in [`examples/README.md`](examples/README.md) (brain, spinal cord).
 
-**Requirements:** Python 3.11+, [Elastix 5.1.0](https://github.com/SuperElastix/elastix/releases/tag/5.1.0) on `PATH`, atlas NIfTI files. See [installation guide](https://lightsuite.readthedocs.io/en/latest/installation/) and [Hardware requirements](#hardware-requirements) below.
+**Requirements:** Python 3.11–3.12, [Elastix 5.1.0](https://github.com/SuperElastix/elastix/releases/tag/5.1.0) on `PATH`, and atlas NIfTI files. See the [installation guide](docs/installation.md) and [Hardware requirements](#hardware-requirements) below.
 
 ---
 
 ## Hardware requirements
 
-The Python pipeline is **CPU + RAM + fast local disk** bound. **GPU is not used** (`compute.use_gpu` is reserved and ignored). Built-in cell detection is not implemented in Python.
+The Python pipeline is bound by **CPU, RAM, and fast local disk**. **The GPU is not used** (`compute.use_gpu` is reserved and ignored). Built-in cell detection is not implemented in Python.
 
-Run `uv run lightsuite doctor -c <config.yaml>` before long jobs — it checks Elastix, scratch free space (≥50 GB), atlas paths, and common config mistakes.
+Run `uv run lightsuite doctor -c <config.yaml>` before long jobs. It checks Elastix, scratch free space (≥50 GB), atlas paths, and common config mistakes.
 
-Use a **fast local SSD/NVMe** for `sample.scratch` (not a network mount). Elastix/transformix temps also use scratch (spinal: `sample.scratch/<sample.name>/`).
+Use a **fast local SSD/NVMe** for `sample.scratch`, not a network mount. Elastix and transformix temporary files also go to scratch (spinal: `sample.scratch/<sample.name>/`).
 
 | Profile | CPU | RAM | Scratch disk | Notes |
 |---------|-----|-----|--------------|-------|
-| Spinal cord, 1–2 channels | 4+ cores | 16 GB | 50 GB SSD | Register/export usually fit 16 GB. |
+| Spinal cord, 1–2 channels | 4+ cores | 16 GB | 50 GB SSD | Register/export usually fit in 16 GB. |
 | Whole brain, 20 µm, 1–2 channels | 8+ cores | 32–64 GB | 100–200 GB SSD | `register` is the RAM peak. |
-| Large brain / wide field / dual-channel MI | 8–16 cores | 64–128 GB | 200–500 GB SSD | Content crop and B-spline tuning often required. |
-| Multiresolution (large overlap crop) | 8+ cores | 32–64 GB+ | 100 GB+ SSD | Watch `check-geometry` RAM warnings. |
+| Large brain / wide field / dual-channel MI | 8–16 cores | 64–128 GB | 200–500 GB SSD | Content crop and B-spline tuning are often required. |
 
-Per-step bottlenecks, sizing formulas, and remediation options are in the [installation guide](https://lightsuite.readthedocs.io/en/latest/installation/) and workflow docs ([brain](https://lightsuite.readthedocs.io/en/latest/usage_lightsheet_brain/), [spinal](https://lightsuite.readthedocs.io/en/latest/usage_spinal_cord/), [multires](https://lightsuite.readthedocs.io/en/latest/usage_multiresolution/)).
+Per-step bottlenecks, sizing guidance, and remediation options are in the [installation guide](docs/installation.md#hardware-and-storage) and the workflow guides ([brain](docs/usage_lightsheet_brain.md), [spinal cord](docs/usage_spinal_cord.md)).
 
 ---
 
-## Python vs original MATLAB LightSuite
+## Python port vs original MATLAB LightSuite
 
-The [original LightSuite](https://lightsuite.readthedocs.io/en/latest/) is a MATLAB toolbox covering whole-brain lightsheet, spinal cord, widefield coronal slices, built-in cell detection, and probe/implant tracing. The Python release is a **focused port** of the registration core — not a full rewrite.
+The [original MATLAB toolbox](https://github.com/dimokaramanlis/LightSuite) covers whole-brain lightsheet, spinal cord, widefield coronal slices, functional ultrasound (fUS), built-in cell detection, and probe/implant tracing. This repository is a **focused Python port of the registration core**. The MATLAB code is not included here.
 
-| | **Python (`lightsuite`)** | **MATLAB (legacy)** |
+| | **PyLightSuite (this repo)** | **LightSuite (MATLAB)** |
 |---|---------------------------|---------------------|
-| **Runtime** | Python 3.11+, CLI + Napari GUIs | MATLAB R2022b+, MATLAB GUIs |
+| **Runtime** | Python 3.11–3.12, CLI + Napari GUIs | MATLAB R2022b+, MATLAB GUIs |
 | **Configuration** | YAML files | Script-based `opts` structs |
 | **Brain registration** | Yes | Yes |
 | **Spinal cord registration** | Yes (per-sample stats) | Yes (+ cohort NNMF analysis) |
-| **Multiresolution overview ↔ ROI** | Yes (`lightsuite multires`) | Limited / vendor-specific paths |
-| **Built-in 3D cell detection** | No — import external spots | Yes (SNR band-pass + local maxima) |
-| **Widefield coronal slice module** | No | Yes (2D per-slice registration, CZI) |
-| **Probe & implant tracing** | No | Yes (`probe_ccf` export) |
+| **Built-in 3D cell detection** | No (import external spots) | Yes |
+| **Widefield coronal slice module** | No | Yes |
+| **Functional ultrasound (fUS)** | No | Yes |
+| **Probe & implant tracing** | No | Yes |
 | **GPU-accelerated detection** | No | Yes |
-| **CZI reader** | No — export to TIFF first | Yes |
+| **CZI reader** | No (export to TIFF first) | Yes |
 
-For features still MATLAB-only, use the legacy demos in `demos/` (`ls_analyze_lightsheet_volume.m`, `ls_analyze_spinal_cord.m`, `ls_analyze_slice_volume.m`). See the detailed parity table in [Python vs MATLAB](https://lightsuite.readthedocs.io/en/latest/python_vs_matlab/).
+See [Brain lightsheet → Migrating from MATLAB](docs/usage_lightsheet_brain.md#migrating-from-matlab) for the command mapping and MATLAB interoperability helpers.
 
 ---
 
 ## Documentation
 
-- [Installation](https://lightsuite.readthedocs.io/en/latest/installation/)
-- [Brain lightsheet usage](https://lightsuite.readthedocs.io/en/latest/usage_lightsheet_brain/)
-- [Spinal cord usage](https://lightsuite.readthedocs.io/en/latest/usage_spinal_cord/)
-- [Multiresolution registration](https://lightsuite.readthedocs.io/en/latest/usage_multiresolution/)
-- [Annotation import](https://lightsuite.readthedocs.io/en/latest/annotation_import/)
+| Guide | Contents |
+|-------|----------|
+| [Home](docs/index.md) | Overview, quick start, documentation map |
+| [Installation](docs/installation.md) | Python, `uv`, Elastix, BCPD, atlas files |
+| [Brain lightsheet](docs/usage_lightsheet_brain.md) | YAML config, CLI stages, outputs, GUI |
+| [Spinal cord](docs/usage_spinal_cord.md) | Straightening, registration, region statistics |
+| [Annotation import](docs/annotation_import.md) | Bringing external spots and masks into atlas space |
+| [Registration spaces](docs/registration_spaces.md) | Atlas-space vs sample-space outputs |
+| [Configuration reference](docs/config_reference.md) | Every YAML key, with GUI/YAML availability |
+
+The `docs/` folder is also an [MkDocs](https://www.mkdocs.org/) site: `uv run --with-requirements docs/requirements.txt mkdocs serve`.
 
 ---
 
-## Support & license
+## Credits, citation & license
 
-- **Issues:** [GitHub Issues](https://github.com/dimokaramanlis/LightSuite/issues)
-- **License:** [GPL-3.0](LICENSE)
+PyLightSuite was created by Louis Pivron (louis.pivron@epfl.ch), derived from **LightSuite** by Karamanlis D, Xie Y, Foucher CG, Alappat M, Masood A, Dimitropoulou I, Pivron LAF, Martínez de Paz JM, Macé E, Gaspari S, and El-Boustani S. Algorithms, default parameters, and atlas conventions follow the MATLAB implementation unless noted otherwise in the docs.
 
-If you use LightSuite in your research, please cite this repository. A preprint is in preparation.
+If you use PyLightSuite in your research, please cite the original work:
+
+> Karamanlis D, *et al.* (2026) **LightSuite: scalable atlas registration and cell detection across the central nervous system.** doi: [10.64898/2026.10.13.757638](https://www.biorxiv.org/content/10.64898/2026.10.13.757638v1)
+
+Until the preprint is available, please also link to this repository when you use the Python port.
+
+- **Python port issues:** [PyLightSuite issues](https://github.com/Wyss-Microscopy/PyLightSuite/issues)
+- **MATLAB toolbox issues:** [LightSuite issues](https://github.com/dimokaramanlis/LightSuite/issues)
+- **License:** [GPL-3.0](LICENSE), the same license as the original LightSuite

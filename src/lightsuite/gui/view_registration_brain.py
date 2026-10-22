@@ -227,8 +227,6 @@ def add_brain_view_layers(
     paths: BrainViewPaths,
     volumes: BrainViewVolumes,
     space: ViewSpace,
-    background_workers: list[Any] | None = None,
-    load_state: dict[str, bool] | None = None,
 ) -> tuple[_ViewState, Callable[[list[int]], None]]:
     """Add Napari layers for one brain view-registration coordinate space."""
     atlas_provider = atlas_display_provider_from_config(config.atlas)
@@ -295,37 +293,6 @@ def add_brain_view_layers(
             contrast_limits=contrast_limits(vol),
         )
         state.channel_layers[ichan] = layer
-
-    roi_cmaps = ["orange", "lime", "violet", "pink"]
-    workers = background_workers if background_workers is not None else []
-    roi_load_state = load_state if load_state is not None else {"cancelled": False}
-
-    for idx, (channel, vol) in enumerate(sorted(volumes.multires_roi_channels.items())):
-        cmap = roi_cmaps[idx % len(roi_cmaps)]
-        viewer.add_image(
-            _to_napari(vol),
-            name=f"ROI registered — ch {channel}",
-            colormap=cmap,
-            blending="additive",
-            opacity=0.55,
-            contrast_limits=contrast_limits(vol),
-        )
-
-    if (
-        space == "sample"
-        and config.multires_link is not None
-        and not volumes.multires_roi_channels
-    ):
-        _schedule_multires_roi_layers(
-            viewer,
-            config,
-            state=state,
-            expected_shape=reference_shape,
-            to_napari=_to_napari,
-            roi_cmaps=roi_cmaps,
-            background_workers=workers,
-            load_state=roi_load_state,
-        )
 
     if volumes.annotation is not None:
         viewer.add_labels(
@@ -456,7 +423,7 @@ def attach_brain_view_registration(
     background_workers: list[Any] = []
     load_state = {"cancelled": False}
 
-    def _teardown_multires_load() -> None:
+    def _teardown_background_load() -> None:
         load_state["cancelled"] = True
         from lightsuite.gui.qt_workers import wait_background_workers
 
@@ -468,7 +435,6 @@ def attach_brain_view_registration(
             config,
             paths=loaded_paths,
             space=target_space,
-            load_multires_roi=target_space == "sample",
         )
         return loaded_paths, loaded_volumes
 
@@ -507,8 +473,6 @@ def attach_brain_view_registration(
         paths=holder["paths"],
         volumes=holder["volumes"],
         space=resolved_space,
-        background_workers=background_workers,
-        load_state=load_state,
     )
     _mount_division_panel(apply_division_mask, holder["volumes"])
 
@@ -521,7 +485,7 @@ def attach_brain_view_registration(
             )
             holder["division_panel"] = None
             holder["division_handle"] = None
-        _teardown_multires_load()
+        _teardown_background_load()
 
     controller = DockStageController(
         result=holder["paths"],
@@ -565,8 +529,6 @@ def attach_brain_view_registration(
                 paths=loaded_paths,
                 volumes=loaded_volumes,
                 space=target_space,
-                background_workers=background_workers,
-                load_state=load_state,
             )
             holder["view_state"] = vs
             holder["space"] = target_space
@@ -617,66 +579,6 @@ def attach_brain_view_registration(
         show_info(fallback_note)
 
     return controller
-
-
-def _schedule_multires_roi_layers(
-    viewer: Any,
-    config: BrainPipelineConfig,
-    *,
-    state: _ViewState,
-    expected_shape: tuple[int, int, int],
-    to_napari,
-    roi_cmaps: list[str],
-    background_workers: list[Any],
-    load_state: dict[str, bool],
-) -> None:
-    """Load multires ROI overlays off the Qt main thread, then add Napari layers."""
-    from napari.utils.notifications import show_info, show_warning
-    from lightsuite.gui.brain_multires_link import load_multires_roi_channels_on_registration_grid
-    from lightsuite.gui.qt_workers import start_background_task
-    from lightsuite.preprocess.checkpoint import RegOptsCheckpoint
-
-    save_path = config.sample.save_path.expanduser()
-    regopts_path = save_path / "regopts.json"
-    if not regopts_path.is_file():
-        return
-
-    def _work() -> dict[str, np.ndarray]:
-        regopts = RegOptsCheckpoint.load(regopts_path)
-        transform_params = _load_transform_params(save_path)
-        return load_multires_roi_channels_on_registration_grid(
-            config,
-            checkpoint=regopts,
-            transform_params=transform_params,
-            expected_shape=expected_shape,
-        )
-
-    def _on_success(channels: dict[str, np.ndarray]) -> None:
-        if load_state.get("cancelled"):
-            return
-        if not channels:
-            show_warning("No multires ROI channels could be loaded for view-registration.")
-            return
-        for idx, (channel, vol) in enumerate(sorted(channels.items())):
-            cmap = roi_cmaps[idx % len(roi_cmaps)]
-            viewer.add_image(
-                to_napari(vol),
-                name=f"ROI registered — ch {channel}",
-                colormap=cmap,
-                blending="additive",
-                opacity=0.55,
-                contrast_limits=contrast_limits(vol),
-            )
-        show_info(f"Added {len(channels)} multires ROI channel(s) on the 20 µm grid.")
-
-    def _on_failure(exc: BaseException) -> None:
-        if load_state.get("cancelled"):
-            return
-        show_warning(f"Multires ROI load failed: {exc}")
-
-    background_workers.append(
-        start_background_task(_work, on_success=_on_success, on_failure=_on_failure)
-    )
 
 
 def run_brain_view_registration(

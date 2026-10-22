@@ -159,12 +159,15 @@ def normalize_registration_volume(volume: np.ndarray) -> np.ndarray:
     ``centind(:,3)``), not a full cubic ROI.
     """
     vol = volume.astype(np.float32, copy=False)
-    cent_px = np.round(np.array(vol.shape, dtype=float) / 2.0).astype(int)
-    naround = max(1, int(round(float(np.min(cent_px)) / 3.0)))
+    shape = np.array(vol.shape, dtype=float)
+    # MATLAB round() goes half away from zero and centpx is 1-based.
+    cent_px = np.floor(shape / 2.0 + 0.5).astype(int)
+    naround = max(1, int(np.floor(float(np.min(cent_px)) / 3.0 + 0.5)))
     offsets = np.arange(-naround, naround + 1, dtype=int)
-    idx0 = cent_px[0] + offsets
-    idx1 = cent_px[1] + offsets
-    idx2 = cent_px[2] + offsets
+    # Clip so tiny volumes (e.g. 3 planes at registration resolution) stay in bounds.
+    idx0 = np.clip(cent_px[0] - 1 + offsets, 0, vol.shape[0] - 1)
+    idx1 = np.clip(cent_px[1] - 1 + offsets, 0, vol.shape[1] - 1)
+    idx2 = np.clip(cent_px[2] - 1 + offsets, 0, vol.shape[2] - 1)
     center_samples = vol[idx0, idx1, idx2]
     top_val = float(np.quantile(center_samples, 0.999)) * 2.0
     if top_val <= 0:

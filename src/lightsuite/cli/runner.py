@@ -139,32 +139,3 @@ def run_spinal_pipeline(
         force_preprocess=False,
         reporter=reporter,
     )
-
-
-def run_multires_pipeline(
-    config_path: str | Path,
-    *,
-    from_stage: str | None = None,
-    through_stage: str | None = None,
-    resume: bool = False,
-    include_optional: bool = True,
-    headless: bool = False,
-    reporter: Reporter | None = None,
-) -> None:
-    path = Path(config_path).expanduser().resolve()
-    workflow = get_workflow("multires")
-    cfg = workflow.load_config(path)
-    _execute_pipeline(
-        workflow="multires",
-        config_path=path,
-        specs=workflow.stage_specs(cfg),
-        statuses=workflow.stage_statuses(cfg),
-        config=cfg,
-        from_stage=from_stage,
-        through_stage=through_stage,
-        resume=resume,
-        include_optional=include_optional,
-        headless=headless,
-        force_preprocess=False,
-        reporter=reporter,
-    )

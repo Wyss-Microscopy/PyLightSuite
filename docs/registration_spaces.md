@@ -5,7 +5,7 @@ LightSuite supports two **complementary** registration output directions:
 | Direction | Transform | Typical use |
 |-----------|-----------|-------------|
 | **Atlas space** (`sample → atlas`) | Warp sample channels into the atlas grid | Cross-subject comparison on a fixed CCF grid |
-| **Sample space** (`atlas → sample`) | Warp atlas labels/template onto the registration grid | Native-grid QC, label transfer without resampling huge volumes, brainreg-style inspection |
+| **Sample space** (`atlas → sample`) | Warp atlas labels/template onto the registration grid | Native-grid QC, label transfer without resampling huge volumes, inspection in the sample's own frame |
 
 Both directions use the **same** elastix transform chain; only the resampling direction differs.
 
@@ -37,40 +37,47 @@ CLI override: `--space atlas|sample|both` on `brain export`, `spinal export`, an
 ## Output layout (brain)
 
 ```
-volume_registered/
-├── chan_01_registered_atlas.tif      # atlas space
-├── chan01_region_stats.csv           # atlas-space intensities
-├── region_stats.csv                  # atlas-space combined stats
-├── region_stats_top10.csv            # wide top-N regions per channel
-├── sample_space/
-│   ├── annotation_in_sample_20um.tif
-│   ├── template_in_sample_20um.tif
-│   ├── division_labels_in_sample_20um.tif
-│   ├── sample_space_manifest.json
-│   ├── chan01_region_stats_sample.csv
-│   ├── region_stats_sample.csv
-│   └── region_stats_sample_top10.csv
-├── {label}_atlas_coords.npz
-├── {label}_sample_coords.npz         # key: regptcoords
-└── {label}_in_sample_20um.tif        # masks only
+<save_path>/
+├── volume_registered/
+│   ├── chan_01_registered_atlas.tif        # atlas space
+│   └── sample_space/
+│       ├── annotation_in_sample_20um.tif
+│       ├── annotation_boundary_in_sample_20um.tif
+│       ├── template_in_sample_20um.tif
+│       ├── division_labels_in_sample_20um.tif
+│       └── sample_space_manifest.json
+├── stats/
+│   ├── region_stats.csv                    # atlas space
+│   ├── region_stats_top10.csv
+│   ├── chan01_region_stats.csv
+│   ├── region_stats_sample.csv             # sample space
+│   ├── region_stats_sample_top10.csv
+│   └── chan01_region_stats_sample.csv
+└── imports/
+    ├── {label}_atlas_coords.npz
+    ├── {label}_sample_coords.npz           # key: regptcoords
+    └── {label}_in_sample_20um.tif          # masks only
 ```
 
 ## Output layout (spinal cord)
 
 ```
-volume_registered/
-├── chan01_channel1.tiff              # atlas native export
-├── annotation_registered.tiff
-├── sample_space/
-│   ├── annotation_in_sample_20um.tif
-│   ├── template_in_sample_20um.tif
-│   ├── segments_in_sample_20um.tif
-│   ├── hemisphere_in_sample_20um.tif
-│   ├── chan_01_sample_straight_20um.tif
-│   ├── sample_space_manifest.json
-│   └── region_stats_sample.csv
-├── {label}_atlas_coords.npz
-└── {label}_sample_coords.npz
+<save_path>/
+├── volume_registered/
+│   ├── chan01_channel1.tiff                # atlas space
+│   ├── annotation_registered.tiff
+│   ├── {label}_atlas_coords.npz
+│   ├── {label}_sample_coords.npz
+│   └── sample_space/
+│       ├── annotation_in_sample_20um.tif
+│       ├── template_in_sample_20um.tif
+│       ├── segments_in_sample_20um.tif
+│       ├── hemisphere_in_sample_20um.tif
+│       ├── chan_01_sample_straight_20um.tif
+│       └── sample_space_manifest.json
+└── stats/
+    ├── region_stats.csv                    # atlas space
+    └── region_stats_sample.csv             # sample space
 ```
 
 ## Comparing statistics across spaces
@@ -83,9 +90,7 @@ volume_registered/
 
 Use atlas space for cross-subject comparison; use sample space for QC and native-resolution workflows that bin into warped labels.
 
-Sample-space hemisphere splits use ``hemisphere_in_sample_20um.tif`` (warped like the
-annotation). The atlas→sample export mirrors the lateral axis, so left/right assignment
-applies the complementary ``flip`` to stay consistent with atlas-space stats.
+Sample-space hemisphere splits use `hemisphere_in_sample_20um.tif` (warped like the annotation). The atlas → sample export mirrors the lateral axis, so left/right assignment applies the complementary flip to stay consistent with atlas-space statistics.
 
 ## Re-running registration
 
@@ -94,4 +99,4 @@ Sample-space export requires forward transform files written at `register`:
 - Brain: `bspline_atlas_to_samp_20um.txt` + `tform_affine_atlas_to_samp20um_px` in `transform_params.json`
 - Spinal: `transforms/bspline_atlas_to_samp_20um.txt`
 
-Existing samples need a **re-run of `register`** (not full preprocess) before first sample-space export.
+Samples registered with an older version that lack these files need a rerun of `register` (not preprocess) before the first sample-space export.

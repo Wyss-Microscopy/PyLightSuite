@@ -29,7 +29,7 @@ def test_resize_xy_fast_output_shape() -> None:
 
 
 def test_resize_xy_fast_preserves_bottom_right_fov() -> None:
-    """Regression: 2048² at scale 0.655 must not top-left crop (Julie 10 µm case)."""
+    """Regression: 2048² at scale 0.655 must not top-left crop (2048² mesoSPIM frame at 10 µm)."""
     plane = np.zeros((2048, 2048), dtype=np.uint16)
     plane[1900:, 1900:] = 5000
     scale = 6.55 / 10.0

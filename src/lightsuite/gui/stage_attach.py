@@ -71,33 +71,6 @@ def _spinal_stats_plots(viewer: Any, config: Any, ctx: StageContext) -> StageCon
     return attach_spinal_stats_plots(viewer, config)
 
 
-def _multires_match_points(viewer: Any, config: Any, ctx: StageContext) -> StageController:
-    from lightsuite.gui.match_points_multires import attach_multires_match_points
-
-    return attach_multires_match_points(viewer, config)
-
-
-def _multires_inspect_geometry_attach(viewer: Any, config: Any, ctx: StageContext) -> StageController:
-    from lightsuite.gui.inspect_geometry_multires import attach_multires_inspect_geometry
-
-    return attach_multires_inspect_geometry(
-        viewer,
-        config,
-        config_path=ctx.config_path,
-        on_config_file_changed=ctx.on_config_file_changed,
-    )
-
-
-def _multires_inspect_registration_attach(viewer: Any, config: Any, ctx: StageContext) -> StageController:
-    from lightsuite.gui.inspect_registration_multires import (
-        attach_multires_inspect_registration,
-        discover_multires_registration_inspect_paths,
-    )
-
-    paths = discover_multires_registration_inspect_paths(config)
-    return attach_multires_inspect_registration(viewer, config, paths)
-
-
 STAGE_ATTACH: dict[tuple[str, str], AttachFactory] = {
     ("brain", "check-orientation"): _brain_orientation,
     ("brain", "align-slices"): _brain_align_slices,
@@ -109,9 +82,6 @@ STAGE_ATTACH: dict[tuple[str, str], AttachFactory] = {
     ("spinal", "align-longitudinal"): _spinal_align_longitudinal,
     ("spinal", "match-points"): _spinal_match_points,
     ("spinal", "plot-stats"): _spinal_stats_plots,
-    ("multires", "inspect-geometry"): _multires_inspect_geometry_attach,
-    ("multires", "match-points"): _multires_match_points,
-    ("multires", "inspect-registration"): _multires_inspect_registration_attach,
 }
 
 

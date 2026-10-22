@@ -4,11 +4,10 @@ validation:
     unrecognized_links: ignore
     anchors: ignore
 
-site_name: LightSuite
-site_description: Python pipeline for mouse lightsheet brain atlas registration
-site_url: https://lightsuite.readthedocs.io/
-repo_url: https://github.com/dimokaramanlis/LightSuite
-repo_name: dimokaramanlis/LightSuite
+site_name: PyLightSuite
+site_description: Register lightsheet brain and spinal cord volumes to anatomical atlases
+repo_url: https://github.com/Wyss-Microscopy/PyLightSuite
+repo_name: Wyss-Microscopy/PyLightSuite
 edit_uri: edit/main/docs/
 
 theme:
@@ -26,13 +25,18 @@ extra_css:
 nav:
   - Home: index.md
   - Installation: installation.md
-  - Python vs MATLAB: python_vs_matlab.md
   - Usage:
-      - Brain lightsheet (Python): usage_lightsheet_brain.md
-      - Multiresolution registration: usage_multiresolution.md
-      - Combined multires → brain: usage_combined_multires_brain.md
+      - Brain lightsheet: usage_lightsheet_brain.md
       - Annotation import: annotation_import.md
       - Registration spaces: registration_spaces.md
       - Spinal cord: usage_spinal_cord.md
-      - Slices (MATLAB): usage_slice.md
   - Configuration reference: config_reference.md
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format

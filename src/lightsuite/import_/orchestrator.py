@@ -1,4 +1,4 @@
-"""Shared driver for annotation import across the brain, cord, and multires pipelines.
+"""Shared driver for annotation import across the brain and cord pipelines.
 
 Each pipeline supplies an :class:`AnnotationImporter` that owns the coordinate
 transform and the output filenames; everything around it — resolving specs,

@@ -1,42 +1,41 @@
-# LightSuite example configs
+# Examples
 
-## Start here (copy-paste templates)
+## Config templates
 
-| Workflow | Canonical template | Documentation |
-|----------|-------------------|---------------|
-| Brain lightsheet | [`brain_lightsheet.yaml`](brain_lightsheet.yaml) | [Brain usage guide](../docs/usage_lightsheet_brain.md) |
-| Spinal cord | [`spinal_cord.yaml`](spinal_cord.yaml) | [Spinal usage guide](../docs/usage_spinal_cord.md) |
-| Multiresolution (overview ↔ ROI) | [`multiresolution.yaml`](multiresolution.yaml) | [Multires usage guide](../docs/usage_multiresolution.md) |
+| Workflow | Template | Guide |
+|----------|----------|-------|
+| Brain lightsheet | [`brain_lightsheet.yaml`](brain_lightsheet.yaml) | [Brain lightsheet](../docs/usage_lightsheet_brain.md) |
+| Spinal cord | [`spinal_cord.yaml`](spinal_cord.yaml) | [Spinal cord](../docs/usage_spinal_cord.md) |
+
+Copy a template next to your data or into the repository folder, replace every `/path/to/...`, then check it:
 
 ```bash
 cp examples/brain_lightsheet.yaml my_mouse.yaml
-# or: cp examples/spinal_cord.yaml my_spinal.yaml
-# or: cp examples/multiresolution.yaml my_multires.yaml
-# edit paths, then:
+uv run lightsuite brain validate-config -c my_mouse.yaml
 uv run lightsuite doctor -c my_mouse.yaml
-uv run lightsuite brain run -c my_mouse.yaml --through match-points
 ```
 
-## Real sample configs (`config/`)
+`validate-config` reports every placeholder path that does not exist yet. You can also build a config interactively with `uv run lightsuite config init brain` (or `spinal`), or with the **From template** button in the Config panel of `uv run lightsuite gui`.
 
-The YAML files under [`config/`](config/) are **machine-specific samples** from lab datasets. They contain absolute paths valid only on the developer workstation. Use them as references for field names and workflow structure — **do not copy paths verbatim**.
+Every key is described in the [configuration reference](../docs/config_reference.md).
 
-| Directory | Contents |
-|-----------|----------|
-| [`config/mesoSPIM/`](config/mesoSPIM/) | Brain lightsheet mesoSPIM acquisitions |
-| [`config/spinal_cord/`](config/spinal_cord/) | Spinal cord samples (OP87, OP93, …) |
-| [`config/multiresolution/`](config/multiresolution/) | Overview ↔ ROI multires manifests |
-| [`config/smartspim/`](config/smartspim/) | SmartSPIM acquisitions |
-| [`config/colm/`](config/colm/) | COLM microscope |
-| [`config/rat/`](config/rat/) | Rat brain (non-mouse atlas) |
+## Annotation import
 
-### Combined multires → brain atlas
+- [`annotation_sample/points.csv`](annotation_sample/points.csv): a minimal points file in LightSuite Sample Space.
+- [`annotation_sample/custom_converter_example.py`](annotation_sample/custom_converter_example.py): a template for `import.converter.suite: custom`.
 
-Some mesoSPIM projects run multires registration first, then brain atlas registration on the overview-aligned data:
+See the [annotation import guide](../docs/annotation_import.md).
 
-1. [`config/multiresolution/marianna_multires.yaml`](config/multiresolution/marianna_multires.yaml) — overview ↔ ROI
-2. [`config/mesoSPIM/marianna_yosi_parity.yaml`](config/mesoSPIM/marianna_yosi_parity.yaml) — brain atlas on converted paths
+## Notebooks
 
-## Notebooks (`notebooks/`)
+[`notebooks/`](notebooks/) holds Jupyter notebooks that convert vendor cell-detection exports to `points.csv`:
 
-Jupyter notebooks for vendor-specific conversion (Arivis, Imaris, mesoSPIM, SmartSPIM) live in [`notebooks/`](notebooks/). SmartSPIM cell detection → LightSuite: [`notebooks/convert_smartspim_detection_to_lightsuite.ipynb`](notebooks/convert_smartspim_detection_to_lightsuite.ipynb) (also `lightsuite brain split-smartspim-channels` / `convert-smartspim-points`). Prefer the CLI manifest builders for multires (`lightsuite multires build-manifest`); see [multires usage](../docs/usage_multiresolution.md).
+| Notebook | Source |
+|----------|--------|
+| [`convert_arivis_to_lightsuite.ipynb`](notebooks/convert_arivis_to_lightsuite.ipynb) | Arivis |
+| [`convert_imaris_to_lightsuite.ipynb`](notebooks/convert_imaris_to_lightsuite.ipynb) | Imaris |
+| [`convert_smartspim_detection_to_lightsuite.ipynb`](notebooks/convert_smartspim_detection_to_lightsuite.ipynb) | SmartSPIM |
+
+The same conversions are available from the command line: `lightsuite brain convert-annotations`, `convert-smartspim-points`, `convert-fiji-points`, and `lightsuite spinal convert-imaris-spots`.
+
+To run the notebooks: `uv run --with jupyter jupyter lab examples/notebooks`.

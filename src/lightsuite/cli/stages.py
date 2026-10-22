@@ -10,7 +10,6 @@ from typing import Any, Protocol
 from lightsuite.config.models import BrainPipelineConfig, SpinalCordPipelineConfig
 from lightsuite.gui.control_points import ControlPointSession, default_session_path
 from lightsuite.gui.slice_correspondence import default_correspondence_path
-from lightsuite.multires.checkpoint import MultiresRegOptsCheckpoint, multires_checkpoint_path
 from lightsuite.preprocess.checkpoint import RegOptsCheckpoint
 from lightsuite.preprocess.cord_checkpoint import CordRegOptsCheckpoint
 from lightsuite.registration.cord_longitudinal import default_longitudinal_correspondence_path
@@ -66,13 +65,6 @@ def _load_cord_regopts(save_path: Path) -> CordRegOptsCheckpoint | None:
     return CordRegOptsCheckpoint.load(path)
 
 
-def _load_multires_checkpoint(save_path: Path) -> MultiresRegOptsCheckpoint | None:
-    path = multires_checkpoint_path(save_path)
-    if not path.is_file():
-        return None
-    return MultiresRegOptsCheckpoint.load(path)
-
-
 def _has_import_annotations(config: _Config) -> bool:
     import_cfg = getattr(config, "import_config", None)
     if import_cfg is None:
@@ -107,7 +99,7 @@ def _annotation_stage_specs() -> list[StageSpec]:
         StageSpec(
             "import-segmentation",
             "Import segmentation",
-            "convert → Sample Space, then warp to atlas/overview (Config: Import segmentation)",
+            "convert → Sample Space, then warp to atlas (Config: Import segmentation)",
             optional=True,
         ),
     ]
@@ -118,7 +110,6 @@ class _PreviewPipelineConfig:
     """Minimal config stand-in for GUI stage-list preview before save."""
 
     import_: Any = None
-    multires: Any = None
 
 
 _PREVIEW_CONFIG = _PreviewPipelineConfig()
@@ -132,8 +123,6 @@ def preview_stage_statuses(workflow: str) -> list[StageStatus]:
         specs = brain_stage_specs(_PREVIEW_CONFIG)  # type: ignore[arg-type]
     elif workflow_key == "spinal":
         specs = spinal_stage_specs(_PREVIEW_CONFIG)  # type: ignore[arg-type]
-    elif workflow_key == "multires":
-        specs = multires_stage_specs(_PREVIEW_CONFIG)
     else:
         msg = f"Unknown workflow {workflow!r} for stage preview."
         raise ValueError(msg)
@@ -236,69 +225,6 @@ def spinal_stage_specs(config: SpinalCordPipelineConfig) -> list[StageSpec]:
             manual=True,
         ),
     ]
-    return stages
-
-
-def _multires_supports_inspect_geometry(config: _Config) -> bool:
-    multires = getattr(config, "multires", None)
-    if multires is None:
-        return False
-    supports = getattr(multires, "supports_inspect_geometry", None)
-    if callable(supports):
-        return bool(supports())
-    return False
-
-
-def _multires_supports_match_points(config: _Config) -> bool:
-    multires = getattr(config, "multires", None)
-    if multires is None:
-        return False
-    supports = getattr(multires, "supports_match_points", None)
-    if callable(supports):
-        return bool(supports())
-    return False
-
-
-def multires_stage_specs(config: _Config) -> list[StageSpec]:
-    stages: list[StageSpec] = []
-    if _multires_supports_inspect_geometry(config):
-        stages.append(
-            StageSpec(
-                "inspect-geometry",
-                "Inspect geometry",
-                "multires.mesospim_geometry lateral_flip",
-                optional=True,
-                manual=True,
-            ),
-        )
-    if _multires_supports_match_points(config):
-        stages.append(
-            StageSpec(
-                "match-points",
-                "Match points",
-                "multires landmark session",
-                optional=True,
-                manual=True,
-            ),
-        )
-    stages.extend(
-        [
-            StageSpec("check-geometry", "Check geometry", "geometry/ overlap QA"),
-            StageSpec("register", "Register", "multires_regopts.json → transform_paths"),
-            *(
-                _annotation_stage_specs()
-                if _has_segmentation_import(config)
-                else ()
-            ),
-            StageSpec(
-                "inspect-registration",
-                "Inspect registration",
-                "registered ROI vs overview (Napari)",
-                optional=True,
-                manual=True,
-            ),
-        ]
-    )
     return stages
 
 
@@ -485,66 +411,6 @@ def _spinal_stage_done(
     return False, "unknown stage"
 
 
-def _multires_geometry_configured(config: Any) -> tuple[bool, str]:
-    multires = config.multires
-    geometry = multires.mesospim_geometry
-    if geometry is None:
-        return False, "multires.mesospim_geometry not set"
-    overview = geometry.overview
-    roi = geometry.roi
-    if overview is None or roi is None:
-        return False, "mesospim_geometry overview/roi incomplete"
-    if overview.lateral_flip is None or roi.lateral_flip is None:
-        return False, "lateral_flip not configured"
-    return True, f"lateral_flip overview={list(overview.lateral_flip)} roi={list(roi.lateral_flip)}"
-
-
-def _multires_stage_done(stage_id: str, save_path: Path, config: Any) -> tuple[bool, str]:
-    checkpoint = _load_multires_checkpoint(save_path)
-    if stage_id == "inspect-geometry":
-        return _multires_geometry_configured(config)
-    if stage_id == "match-points":
-        multires = config.multires
-        if multires.landmarks and multires.landmarks.session_path:
-            path = Path(multires.landmarks.session_path).expanduser()
-        else:
-            path = save_path / f"multires_landmarks_{multires.pair_label}.json"
-        return path.is_file(), str(path)
-    if stage_id == "check-geometry":
-        if checkpoint and checkpoint.geometry_report_paths:
-            return True, "geometry reports in checkpoint"
-        geom = save_path / "geometry"
-        return geom.is_dir() and any(geom.rglob("*")), str(geom)
-    if stage_id == "register":
-        if checkpoint is None:
-            return False, "missing multires_regopts.json"
-        if not checkpoint.transform_paths:
-            return False, "no transform_paths"
-        return True, str(multires_checkpoint_path(save_path))
-    if stage_id == "inspect-registration":
-        if checkpoint is None or not checkpoint.registered_roi_path:
-            return False, "run multires register first"
-        path = Path(checkpoint.registered_roi_path).expanduser()
-        return path.is_file(), str(path)
-    if stage_id == "import-segmentation":
-        out = save_path / "annotations_in_overview"
-        if out.is_dir():
-            artifacts = list(out.glob("*.csv")) + list(out.glob("*.tif")) + list(out.glob("*.tiff"))
-            if artifacts:
-                return True, f"{len(artifacts)} file(s)"
-        convert_summary = save_path / "converted" / "convert_annotations_summary.json"
-        ck_path = multires_checkpoint_path(save_path)
-        registered = False
-        if ck_path.is_file():
-            registered = bool(MultiresRegOptsCheckpoint.load(ck_path).transform_paths)
-        if convert_summary.is_file() and not registered:
-            return False, "converted; run multires register, then Import segmentation again"
-        if not _has_segmentation_import(config):
-            return False, "enable Import segmentation in Config"
-        return False, str(out)
-    return False, "unknown stage"
-
-
 def evaluate_stage_statuses(
     specs: list[StageSpec],
     *,
@@ -556,7 +422,6 @@ def evaluate_stage_statuses(
     for spec in specs:
         if spec.optional and spec.id in {
             "align-slices",
-            "inspect-geometry",
             "match-points",
             "inspect-registration",
             "view-registration",
@@ -588,16 +453,6 @@ def spinal_stage_statuses(config: SpinalCordPipelineConfig) -> list[StageStatus]
     return evaluate_stage_statuses(
         spinal_stage_specs(config),
         done_fn=_spinal_stage_done,
-        save_path=save_path,
-        config=config,
-    )
-
-
-def multires_stage_statuses(config: Any) -> list[StageStatus]:
-    save_path = config.sample.save_path.expanduser()
-    return evaluate_stage_statuses(
-        multires_stage_specs(config),
-        done_fn=_multires_stage_done,
         save_path=save_path,
         config=config,
     )

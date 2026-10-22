@@ -19,9 +19,6 @@ from lightsuite.gui.config_form_data import (
     import_annotations_from_raw,
     import_annotations_to_raw,
     load_template_raw,
-    merge_yaml_only_multires_fields,
-    multires_form_from_raw,
-    multires_form_to_raw,
     parse_orientation_text,
     resolve_brain_brainglobe_form_fields,
     spinal_form_from_raw,
@@ -88,29 +85,13 @@ def test_load_template_raw_unknown_workflow() -> None:
         load_template_raw("not_a_workflow")
 
 
-def test_load_template_raw_multires_is_blank_starter() -> None:
-    workflow, raw = load_template_raw("multires")
-    assert workflow == "multires"
-    assert raw["sample"]["name"] == "example_multires"
-    assert raw["multires"]["vendor"]["suite"] == "mesospim"
-    assert "pair_manifest" not in (raw["multires"] or {})
-    assert "488" in raw["multires"]["channels"]
-    assert raw["multires"]["geometry_mode"] == "metadata"
-    state = multires_form_from_raw(raw)
-    assert state.vendor_suite == "mesospim"
-    assert state.reference_channel == "488"
-    assert len(state.channels) == 2
-
-
 def test_tooltips_for_workflow_brain_and_spinal_differ_on_atlas() -> None:
     from lightsuite.gui.config_form_tooltips import tooltips_for_workflow
 
     brain = tooltips_for_workflow("brain")
     spinal = tooltips_for_workflow("spinal")
-    multires = tooltips_for_workflow("multires")
     assert "atlas_dir" in brain
     assert "Fiederling" in spinal["atlas_dir"]
-    assert "pair_manifest" in multires
     assert brain["atlas_dir"] != spinal["atlas_dir"]
 
 
@@ -452,195 +433,16 @@ def test_spinal_form_always_enables_parcellate_intensities() -> None:
     assert updated["analysis"]["parcellate_intensities"] is True
 
 
-def test_multires_form_roundtrip_geometry_and_registration() -> None:
-    raw = {
-        "sample": {"name": "tg14", "save_path": "/out", "scratch": "/scratch"},
-        "multires": {
-            "pair_label": "pair",
-            "geometry_mode": "hybrid",
-            "landmarks": {"fit_mode": "affine"},
-            "registration": {
-                "reference_channel": "488",
-                "experiment_name": "tg14_hybrid",
-                "overlap_margin_um": -10.0,
-                "write_full_overview_canvas": False,
-            },
-            "channels": {"488": {"overview": "/ov.tif", "roi": "/roi.tif"}},
-        },
-        "import": {
-            "annotations": [{"format": "points_csv", "path": "/a.csv"}],
-        },
-    }
-    state = multires_form_from_raw(raw)
-    assert state.geometry_mode == "hybrid"
-    assert state.landmark_fit_mode == "affine"
-    assert state.overlap_margin_um == -10.0
-    assert state.experiment_name == "tg14_hybrid"
-    assert state.write_full_overview_canvas is False
-    assert state.vendor_suite == "mesospim"
-    updated = multires_form_to_raw(state, raw)
-    assert updated["multires"]["geometry_mode"] == "hybrid"
-    assert updated["multires"]["landmarks"]["fit_mode"] == "affine"
-    assert updated["multires"]["registration"]["overlap_margin_um"] == -10.0
-    assert updated["multires"]["registration"]["experiment_name"] == "tg14_hybrid"
-    assert updated["multires"]["vendor"]["suite"] == "mesospim"
-    assert updated["import"]["annotations"][0]["path"] == "/a.csv"
-
-
-def test_multires_form_drops_mesospim_geometry_for_smartspim_vendor() -> None:
-    raw = {
-        "sample": {"name": "s", "save_path": "/out"},
-        "multires": {
-            "vendor": {"suite": "smartspim"},
-            "geometry_mode": "metadata",
-            "mesospim_geometry": {
-                "overview": {"lateral_flip": [1, -1]},
-                "roi": {"lateral_flip": [1, -1]},
-            },
-            "channels": {"640": {"overview": "/ov", "roi": "/roi"}},
-        },
-    }
-    state = multires_form_from_raw(raw)
-    state.vendor_suite = "smartspim"
-    updated = multires_form_to_raw(state, raw)
-    assert updated["multires"]["vendor"]["suite"] == "smartspim"
-    assert "mesospim_geometry" not in updated["multires"]
-
-
-def test_merge_yaml_only_multires_fields_keeps_inspect_geometry_flip() -> None:
-    form_raw = {
-        "sample": {"name": "s", "save_path": "/out"},
-        "multires": {
-            "vendor": {"suite": "mesospim"},
-            "channels": {"488": {"overview": "/ov.tif", "roi": "/roi.tif"}},
-        },
-    }
-    disk_raw = {
-        "sample": {"name": "s", "save_path": "/out"},
-        "multires": {
-            "vendor": {"suite": "mesospim"},
-            "channels": {"488": {"overview": "/ov.tif", "roi": "/roi.tif"}},
-            "mesospim_geometry": {
-                "overview": {"lateral_flip": [-1, -1]},
-                "roi": {"lateral_flip": [-1, -1]},
-            },
-        },
-    }
-    merged = merge_yaml_only_multires_fields(form_raw, disk_raw)
-    assert merged["multires"]["mesospim_geometry"]["overview"]["lateral_flip"] == [-1, -1]
-    state = multires_form_from_raw(merged)
-    saved = multires_form_to_raw(state, merged)
-    assert saved["multires"]["mesospim_geometry"]["roi"]["lateral_flip"] == [-1, -1]
-
-
-def test_dump_config_dict_keeps_lateral_flip_inline() -> None:
+def test_dump_config_dict_keeps_short_numeric_lists_inline() -> None:
     text = dump_config_dict(
         {
-            "multires": {
-                "mesospim_geometry": {
-                    "overview": {"lateral_flip": [-1, -1]},
-                    "roi": {"lateral_flip": [-1, -1]},
-                },
-                "registration": {"elastix_stages": ["translation", "rigid"]},
-            }
+            "sample": {"voxel_um": [1.8, 1.8, 4.0]},
+            "analysis": {"stats_spaces": ["atlas", "sample"]},
         }
     )
-    assert "lateral_flip: [-1, -1]" in text
-    assert "elastix_stages:" in text
-    assert "- translation" in text
-
-
-def test_multires_form_roundtrip_vendor_manifest_and_custom() -> None:
-    manifest_raw = {
-        "sample": {"name": "s", "save_path": "/out"},
-        "multires": {
-            "vendor": {"suite": "manifest"},
-            "pair_manifest": "/data/pair.json",
-        },
-    }
-    manifest_state = multires_form_from_raw(manifest_raw)
-    assert manifest_state.vendor_suite == "manifest"
-    assert manifest_state.pair_manifest == "/data/pair.json"
-    manifest_updated = multires_form_to_raw(manifest_state, manifest_raw)
-    assert manifest_updated["multires"]["vendor"]["suite"] == "manifest"
-
-    custom_raw = {
-        "sample": {"name": "s", "save_path": "/out"},
-        "multires": {
-            "vendor": {"suite": "custom", "custom_entry": "/scripts/build.py"},
-            "channels": {"488": {"overview": "/ov.tif", "roi": "/roi.tif"}},
-        },
-    }
-    custom_state = multires_form_from_raw(custom_raw)
-    assert custom_state.vendor_suite == "custom"
-    assert custom_state.vendor_custom_entry == "/scripts/build.py"
-    custom_updated = multires_form_to_raw(custom_state, custom_raw)
-    assert custom_updated["multires"]["vendor"]["custom_entry"] == "/scripts/build.py"
-
-    meta_raw = {
-        "sample": {"name": "s", "save_path": "/out"},
-        "multires": {
-            "vendor": {"suite": "smartspim"},
-            "channels": {
-                "488": {
-                    "overview": "/ov.tif",
-                    "roi": "/roi.tif",
-                    "overview_meta_path": "/ov_meta.json",
-                    "roi_meta_path": "/roi_meta.txt",
-                },
-            },
-        },
-    }
-    meta_state = multires_form_from_raw(meta_raw)
-    assert meta_state.channels[0].overview_meta == "/ov_meta.json"
-    assert meta_state.channels[0].roi_meta == "/roi_meta.txt"
-    meta_updated = multires_form_to_raw(meta_state, meta_raw)
-    ch = meta_updated["multires"]["channels"]["488"]
-    assert ch["overview_meta_path"] == "/ov_meta.json"
-    assert ch["roi_meta_path"] == "/roi_meta.txt"
-
-
-def test_multires_form_prunes_stale_apply_transform_to() -> None:
-    """Template leftovers must not block save when channels are reduced."""
-    raw = {
-        "sample": {"name": "s", "save_path": "/out"},
-        "multires": {
-            "pair_manifest": "/legacy/gilda_pair.json",
-            "vendor": {"suite": "smartspim"},
-            "channels": {"488": {"overview": "/ov.tif", "roi": "/roi.tif"}},
-            "registration": {
-                "reference_channel": "488",
-                "apply_transform_to": ["555", "647"],
-            },
-        },
-    }
-    state = multires_form_from_raw(raw)
-    updated = multires_form_to_raw(state, raw)
-    assert "apply_transform_to" not in updated["multires"]["registration"]
-    assert "pair_manifest" not in updated["multires"]
-    assert updated["multires"]["vendor"]["suite"] == "smartspim"
-
-
-def test_multires_form_roundtrips_geometry_check_level() -> None:
-    raw = {
-        "sample": {"name": "s", "save_path": "/out"},
-        "multires": {
-            "vendor": {"suite": "smartspim"},
-            "channels": {"488": {"overview": "/ov", "roi": "/roi"}},
-            "registration": {
-                "reference_channel": "488",
-                "geometry_check_level": "slice-qc",
-            },
-        },
-    }
-    state = multires_form_from_raw(raw)
-    assert state.geometry_check_level == "slice-qc"
-    updated = multires_form_to_raw(state, raw)
-    assert updated["multires"]["registration"]["geometry_check_level"] == "slice-qc"
-
-    state.geometry_check_level = "full"
-    updated = multires_form_to_raw(state, raw)
-    assert "geometry_check_level" not in updated["multires"]["registration"]
+    assert "voxel_um: [1.8, 1.8, 4.0]" in text
+    assert "stats_spaces:" in text
+    assert "- atlas" in text
 
 
 def test_import_annotations_to_raw_clears_empty_rows() -> None:

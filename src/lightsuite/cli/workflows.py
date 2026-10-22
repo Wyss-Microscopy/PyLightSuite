@@ -18,19 +18,11 @@ spinal
   Template: examples/spinal_cord.yaml
   Run:      lightsuite spinal run -c my.yaml
 
-multires
-  Overview ↔ high-resolution ROI (mesoSPIM, SmartSPIM) without atlas.
-  Template: declare channels in YAML or build a manifest first.
-  Run:      lightsuite multires run -c my.yaml
-
-Stay on MATLAB for
-  • Widefield coronal slices (demos/ls_analyze_slice_volume.m)
+Use the original MATLAB LightSuite (github.com/dimokaramanlis/LightSuite) for
+  • Widefield coronal slices
   • Built-in cell detection
   • CZI native reader
   • Spinal cohort NNMF analysis
-
-Combined multires → brain
-  See docs/usage_combined_multires_brain.md
 """
 
 
@@ -43,5 +35,5 @@ workflow_app = typer.Typer(help="Choose a LightSuite workflow.")
 
 @workflow_app.command("list")
 def workflow_list() -> None:
-    """Print which workflow to use (brain vs spinal vs multires vs MATLAB)."""
+    """Print which workflow to use (brain vs spinal vs MATLAB)."""
     print_workflow_list()

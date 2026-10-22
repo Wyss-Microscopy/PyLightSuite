@@ -57,8 +57,8 @@ def test_validate_registry_passes() -> None:
     validate_registry()
 
 
-def test_workflows_cover_brain_spinal_multires() -> None:
-    assert set(WORKFLOWS) == {"brain", "spinal", "multires"}
+def test_workflows_cover_brain_and_spinal() -> None:
+    assert set(WORKFLOWS) == {"brain", "spinal"}
 
 
 def test_get_workflow_unknown_raises() -> None:

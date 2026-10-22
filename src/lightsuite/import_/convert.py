@@ -274,7 +274,7 @@ def run_convert_annotations(
 
 
 def run_convert_annotations_for_pipeline(config: Any) -> ConvertAnnotationsResult:
-    """Brain / spinal / multires entrypoint using ``config.sample.save_path``."""
+    """Brain / spinal entrypoint using ``config.sample.save_path``."""
     save_path = config.sample.save_path.expanduser()
     voxel = getattr(config.sample, "voxel_um", None)
     return run_convert_annotations(

@@ -350,6 +350,13 @@ def test_brain_view_spaces_available(tmp_path: Path) -> None:
     _write_transform_params(save_path, shape_yxz=shape)
     save_registration_volume(np.zeros(shape, dtype=np.uint16), vr / "chan_01_registered_atlas.tif")
 
+    # Atlas-space review needs the atlas template/annotation to resolve.
+    atlas_dir = tmp_path / "atlas"
+    atlas_dir.mkdir()
+    atlas_volume = np.zeros(shape, dtype=np.uint16)
+    nib.save(nib.Nifti1Image(atlas_volume, np.eye(4)), str(atlas_dir / "average_template_10.nii.gz"))
+    nib.save(nib.Nifti1Image(atlas_volume, np.eye(4)), str(atlas_dir / "annotation_10.nii.gz"))
+
     config_path = tmp_path / "brain.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -361,7 +368,7 @@ def test_brain_view_spaces_available(tmp_path: Path) -> None:
                     "save_path": str(save_path),
                     "voxel_um": [1.0, 1.0, 1.0],
                 },
-                "atlas": {"provider": "allen", "atlas_dir": str(tmp_path / "atlas")},
+                "atlas": {"provider": "allen", "atlas_dir": str(atlas_dir)},
             }
         ),
         encoding="utf-8",

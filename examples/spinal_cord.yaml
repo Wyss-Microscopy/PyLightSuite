@@ -7,7 +7,7 @@
 # Download atlas: https://data.mendeley.com/datasets/4rrggzv5d5/1
 # Set atlas.atlas_dir to the folder containing Segments.csv and Template.tif.
 #
-# See examples/README.md and docs/usage_spinal_cord.md.
+# Guide: docs/usage_spinal_cord.md · every key: docs/config_reference.md
 
 sample:
   name: example_spinal_cord

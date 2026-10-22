@@ -168,7 +168,12 @@ def test_ensure_division_map_caches(tmp_path: Path) -> None:
     assert second.labels.shape == first.labels.shape
 
 
-def test_build_division_labels_bad_membership_columns(tmp_path: Path) -> None:
+def test_build_division_labels_bad_membership_columns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A machine-wide membership CSV would take precedence over the broken one below.
+    monkeypatch.delenv("LIGHTSUITE_ALLEN_PARCELLATION_CSV", raising=False)
+    monkeypatch.delenv("LIGHTSUITE_ATLAS_PATH", raising=False)
     atlas_dir = tmp_path / "atlas"
     atlas_dir.mkdir()
     shape = (2, 2, 2)

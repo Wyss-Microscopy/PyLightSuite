@@ -4,7 +4,7 @@
 #   uv run lightsuite doctor -c my_mouse.yaml
 #   uv run lightsuite brain validate-config -c my_mouse.yaml
 #
-# See examples/README.md for workflow index and real sample configs.
+# Guide: docs/usage_lightsheet_brain.md · every key: docs/config_reference.md
 
 sample:
   name: example_mouse
@@ -29,17 +29,13 @@ atlas:
 registration:
   resolution_um: 20
   channel_primary: 1
-  channel_secondary: 2
+  channel_secondary: 2            # optional second channel for dual MI; delete if unused
   bspline_spatial_scale_mm: 0.64
   control_point_weight: 0.2
 
+# Built-in cell detection is not available; import external detections instead.
 detection:
   enabled: false
-  backend: classical
-  cell_diameter_um: 14
-  thresholds: [0.5, 0.4]
-  channel: null
-  debug: false
 
 compute:
   workers: 4

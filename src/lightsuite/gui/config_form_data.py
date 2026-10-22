@@ -20,7 +20,7 @@ from lightsuite.atlas.brainglobe_backend import (
     list_lightsuite_brainglobe_atlases,
 )
 from lightsuite.cli.spaces import default_export_space_checks, export_spaces_from_checks
-from lightsuite.config.workflow import detect_workflow, is_brain_multires_link, load_project
+from lightsuite.config.workflow import detect_workflow, load_project
 from lightsuite.exceptions import LightsuiteConfigError
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -28,17 +28,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONFIG_TEMPLATES: dict[str, Path] = {
     "brain": _REPO_ROOT / "examples/brain_lightsheet.yaml",
     "spinal": _REPO_ROOT / "examples/spinal_cord.yaml",
-    "multires": _REPO_ROOT / "examples/multiresolution.yaml",
 }
-
-
-@dataclass
-class ChannelPaths:
-    name: str
-    overview: str = ""
-    roi: str = ""
-    overview_meta: str = ""
-    roi_meta: str = ""
 
 
 @dataclass
@@ -401,89 +391,6 @@ class SpinalFormState:
     workers: int = 4
 
 
-@dataclass
-class MultiresFormState:
-    sample_name: str = ""
-    save_path: str = ""
-    scratch: str = ""
-    pair_label: str = ""
-    vendor_suite: str = "mesospim"
-    vendor_custom_entry: str = ""
-    pair_manifest: str = ""
-    reference_channel: str = ""
-    experiment_name: str = "default"
-    channels: list[ChannelPaths] = field(default_factory=list)
-    geometry_mode: str = "metadata"
-    landmark_fit_mode: str = "similarity"
-    overlap_margin_um: float = 0.0
-    write_full_overview_canvas: bool = True
-    geometry_check_level: str = "full"
-    import_segmentation: bool = False
-    import_converter: AnnotationConverterState = field(default_factory=AnnotationConverterState)
-    import_annotations: list[AnnotationImportRow] = field(default_factory=list)
-
-
-def _infer_multires_vendor_suite(multires: dict[str, Any]) -> str:
-    vendor = multires.get("vendor") or {}
-    if isinstance(vendor, dict):
-        suite = str(vendor.get("suite") or "").strip().lower()
-        if suite:
-            return suite
-        if str(vendor.get("custom_entry") or "").strip():
-            return "custom"
-    channels_raw = multires.get("channels") or {}
-    has_channels = isinstance(channels_raw, dict) and bool(channels_raw)
-    has_manifest = bool(str(multires.get("pair_manifest") or "").strip())
-    if has_manifest and not has_channels:
-        return "manifest"
-    return "mesospim"
-
-
-def _multires_vendor_from_raw(multires: dict[str, Any]) -> tuple[str, str]:
-    vendor = multires.get("vendor") or {}
-    suite = _infer_multires_vendor_suite(multires)
-    custom_entry = ""
-    if isinstance(vendor, dict):
-        custom_entry = _path_str(vendor.get("custom_entry"))
-    return suite, custom_entry
-
-
-def _apply_multires_vendor_to_raw(
-    *,
-    suite: str,
-    custom_entry: str,
-    multires: dict[str, Any],
-) -> dict[str, Any]:
-    suite_key = (suite or "mesospim").strip().lower()
-    vendor: dict[str, Any] = {"suite": suite_key}
-    if suite_key == "custom" and custom_entry.strip():
-        vendor["custom_entry"] = custom_entry.strip()
-    multires["vendor"] = vendor
-    return multires
-
-
-def merge_yaml_only_multires_fields(
-    form_raw: dict[str, Any],
-    disk_raw: dict[str, Any],
-) -> dict[str, Any]:
-    """Keep form fields; copy YAML-only keys written by inspect-geometry.
-
-    ``multires.mesospim_geometry`` is not on the config form. Apply-to-YAML updates
-    the file, then a later Config Save would otherwise overwrite it from stale
-    in-memory YAML.
-    """
-    out = dict(form_raw)
-    disk_multires = disk_raw.get("multires")
-    if not isinstance(disk_multires, dict):
-        return out
-    if "mesospim_geometry" not in disk_multires:
-        return out
-    form_multires = dict(out.get("multires") or {})
-    form_multires["mesospim_geometry"] = disk_multires["mesospim_geometry"]
-    out["multires"] = form_multires
-    return out
-
-
 def load_template_raw(workflow: str) -> tuple[str, dict[str, Any]]:
     """Load a starter YAML template as ``(workflow, raw_dict)``."""
     key = workflow.strip().lower()
@@ -507,15 +414,6 @@ def load_raw_config(path: Path, *, workflow_hint: str | None = None) -> tuple[st
         msg = f"Config must be a non-empty YAML mapping: {resolved}"
         raise LightsuiteConfigError(msg)
     workflow = detect_workflow(raw)
-    if workflow_hint in {"brain", "spinal", "multires"} and workflow != workflow_hint:
-        multires = raw.get("multires")
-        if (
-            workflow_hint == "multires"
-            and isinstance(multires, dict)
-            and multires
-            and not is_brain_multires_link(multires)
-        ):
-            workflow = "multires"
     return workflow, raw
 
 
@@ -861,141 +759,6 @@ def spinal_form_to_raw(state: SpinalFormState, raw: dict[str, Any]) -> dict[str,
     )
 
 
-def multires_form_from_raw(raw: dict[str, Any]) -> MultiresFormState:
-    sample = raw.get("sample") or {}
-    multires = raw.get("multires") or {}
-    registration = multires.get("registration") or {}
-    channels_raw = multires.get("channels") or {}
-    channels: list[ChannelPaths] = []
-    if isinstance(channels_raw, dict):
-        for name, item in channels_raw.items():
-            if not isinstance(item, dict):
-                continue
-            channels.append(
-                ChannelPaths(
-                    name=str(name),
-                    overview=_path_str(item.get("overview")),
-                    roi=_path_str(item.get("roi")),
-                    overview_meta=_path_str(item.get("overview_meta_path")),
-                    roi_meta=_path_str(item.get("roi_meta_path")),
-                )
-            )
-    landmarks = multires.get("landmarks") or {}
-    vendor_suite, vendor_custom_entry = _multires_vendor_from_raw(multires)
-    return MultiresFormState(
-        sample_name=str(sample.get("name") or ""),
-        save_path=_path_str(sample.get("save_path")),
-        scratch=_path_str(sample.get("scratch")),
-        pair_label=str(multires.get("pair_label") or ""),
-        vendor_suite=vendor_suite,
-        vendor_custom_entry=vendor_custom_entry,
-        pair_manifest=_path_str(multires.get("pair_manifest")),
-        reference_channel=str(registration.get("reference_channel") or ""),
-        experiment_name=str(registration.get("experiment_name") or "default"),
-        channels=channels,
-        geometry_mode=str(multires.get("geometry_mode") or "metadata"),
-        landmark_fit_mode=str(landmarks.get("fit_mode") or "similarity"),
-        overlap_margin_um=float(registration.get("overlap_margin_um") or 0.0),
-        write_full_overview_canvas=bool(registration.get("write_full_overview_canvas", True)),
-        geometry_check_level=str(registration.get("geometry_check_level") or "full"),
-        import_segmentation=import_segmentation_enabled_from_raw(raw),
-        import_converter=import_converter_from_raw(raw),
-        import_annotations=import_annotations_from_raw(raw),
-    )
-
-
-def multires_form_to_raw(state: MultiresFormState, raw: dict[str, Any]) -> dict[str, Any]:
-    out = dict(raw)
-    sample = dict(out.get("sample") or {})
-    sample["name"] = state.sample_name.strip() or "sample"
-    sample["save_path"] = state.save_path.strip()
-    if state.scratch.strip():
-        sample["scratch"] = state.scratch.strip()
-    else:
-        sample.pop("scratch", None)
-    out["sample"] = sample
-
-    multires = dict(out.get("multires") or {})
-    if state.pair_label.strip():
-        multires["pair_label"] = state.pair_label.strip()
-    else:
-        multires.pop("pair_label", None)
-    if state.pair_manifest.strip() and state.vendor_suite == "manifest":
-        multires["pair_manifest"] = state.pair_manifest.strip()
-    else:
-        # Built-in / custom vendors write under save_path/converted/; drop template leftovers.
-        multires.pop("pair_manifest", None)
-
-    multires = _apply_multires_vendor_to_raw(
-        suite=state.vendor_suite,
-        custom_entry=state.vendor_custom_entry,
-        multires=multires,
-    )
-    if state.vendor_suite.strip().lower() != "mesospim":
-        multires.pop("mesospim_geometry", None)
-
-    multires["geometry_mode"] = state.geometry_mode
-    landmarks = dict(multires.get("landmarks") or {})
-    landmarks["fit_mode"] = state.landmark_fit_mode
-    multires["landmarks"] = landmarks
-
-    channels: dict[str, dict[str, str]] = {}
-    for item in state.channels:
-        name = item.name.strip()
-        if not name:
-            continue
-        entry: dict[str, str] = {}
-        if item.overview.strip():
-            entry["overview"] = item.overview.strip()
-        if item.roi.strip():
-            entry["roi"] = item.roi.strip()
-        if item.overview_meta.strip():
-            entry["overview_meta_path"] = item.overview_meta.strip()
-        if item.roi_meta.strip():
-            entry["roi_meta_path"] = item.roi_meta.strip()
-        if entry:
-            channels[name] = entry
-    if channels:
-        multires["channels"] = channels
-    else:
-        multires.pop("channels", None)
-
-    registration = dict(multires.get("registration") or {})
-    if state.reference_channel.strip():
-        registration["reference_channel"] = state.reference_channel.strip()
-    else:
-        registration.pop("reference_channel", None)
-    registration["overlap_margin_um"] = state.overlap_margin_um
-    registration["write_full_overview_canvas"] = state.write_full_overview_canvas
-    level = (state.geometry_check_level or "full").strip().lower()
-    if level and level != "full":
-        registration["geometry_check_level"] = level
-    else:
-        registration.pop("geometry_check_level", None)
-    experiment_name = state.experiment_name.strip() or "default"
-    if experiment_name != "default":
-        registration["experiment_name"] = experiment_name
-    else:
-        registration.pop("experiment_name", None)
-    # Template leftovers (e.g. Gilda apply_transform_to: [555, 647]) must not survive
-    # when the form only keeps a subset of channels.
-    apply_raw = registration.get("apply_transform_to")
-    if isinstance(apply_raw, list):
-        kept = [str(name) for name in apply_raw if str(name) in channels]
-        if kept:
-            registration["apply_transform_to"] = kept
-        else:
-            registration.pop("apply_transform_to", None)
-    multires["registration"] = registration
-    out["multires"] = multires
-    return _apply_import_to_raw(
-        state.import_converter,
-        state.import_annotations,
-        out,
-        enabled=state.import_segmentation,
-    )
-
-
 def try_validate_config_dict(
     data: dict[str, Any],
     *,
@@ -1013,21 +776,11 @@ def try_validate_config_dict(
         temp_path = Path(handle.name)
     try:
         detected = detect_workflow(data)
-        use_workflow = workflow if workflow in {"brain", "spinal", "multires"} else detected
-        multires = data.get("multires")
-        if (
-            workflow == "multires"
-            and isinstance(multires, dict)
-            and multires
-            and not is_brain_multires_link(multires)
-        ):
-            use_workflow = "multires"
+        use_workflow = workflow if workflow in {"brain", "spinal"} else detected
         if use_workflow == detected:
             return load_project(temp_path)
-        from lightsuite.config.loader import load_config, load_multires_config, load_spinal_config
+        from lightsuite.config.loader import load_config, load_spinal_config
 
-        if use_workflow == "multires":
-            return "multires", load_multires_config(temp_path)
         if use_workflow == "spinal":
             return "spinal", load_spinal_config(temp_path)
         return "brain", load_config(temp_path)

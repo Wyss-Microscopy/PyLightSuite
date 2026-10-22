@@ -10,17 +10,15 @@ from rich.table import Table
 
 from lightsuite.cli.runner import (
     run_brain_pipeline,
-    run_multires_pipeline,
     run_spinal_pipeline,
 )
 from lightsuite.cli.stages import (
     StageState,
     StageStatus,
     brain_stage_statuses,
-    multires_stage_statuses,
     spinal_stage_statuses,
 )
-from lightsuite.config.loader import load_config, load_multires_config, load_spinal_config
+from lightsuite.config.loader import load_config, load_spinal_config
 
 console = Console()
 
@@ -142,44 +140,6 @@ def register_spinal_commands(app: typer.Typer) -> None:
     ) -> None:
         """Run spinal pipeline stages in order."""
         run_spinal_pipeline(
-            config,
-            from_stage=from_stage,
-            through_stage=through_stage,
-            resume=resume,
-            include_optional=include_optional,
-            headless=headless,
-        )
-
-
-def register_multires_commands(app: typer.Typer) -> None:
-    @app.command("stages")
-    def multires_stages(
-        config: str = typer.Option(..., "--config", "-c", help="Multires pipeline YAML config."),
-    ) -> None:
-        """Show multires pipeline stage checklist and checkpoint status."""
-        cfg = load_multires_config(config)
-        statuses = multires_stage_statuses(cfg)
-        _print_stage_table(statuses, save_path=cfg.sample.save_path.expanduser())
-
-    @app.command("run")
-    def multires_run(
-        config: str = typer.Option(..., "--config", "-c", help="Multires pipeline YAML config."),
-        from_stage: str | None = typer.Option(None, "--from", help="First stage to run."),
-        through_stage: str | None = typer.Option(None, "--through", help="Last stage to run."),
-        resume: bool = typer.Option(False, "--resume", help="Skip completed stages."),
-        include_optional: bool = typer.Option(
-            True,
-            "--include-optional/--no-include-optional",
-            help="Run optional match-points and import-segmentation when configured.",
-        ),
-        headless: bool = typer.Option(
-            False,
-            "--headless",
-            help="Run GUI stages in headless mode (HPC/CI only).",
-        ),
-    ) -> None:
-        """Run multires pipeline stages in order."""
-        run_multires_pipeline(
             config,
             from_stage=from_stage,
             through_stage=through_stage,

@@ -16,7 +16,7 @@ _COMMON: dict[str, str] = {
         "Parallel CPU processes for preprocess slice loading only. Helps brain "
         "channelperfile stacks and spinal planeperfile; brain planeperfile "
         "(SmartSPIM/Terastitcher) stays at one worker to avoid disk thrashing. "
-        "Does not affect init-registration, register, export, or multires."
+        "Does not affect init-registration, register, or export."
     ),
 }
 
@@ -203,85 +203,10 @@ _SPINAL: dict[str, str] = {
     ),
 }
 
-_MULTIRES: dict[str, str] = {
-    **_COMMON,
-    "pair_label": (
-        "Short label for this overview/ROI pair, used in manifest filenames and log messages."
-    ),
-    "multires_vendor": (
-        "How overview/ROI paths are converted into a pair manifest: built-in mesoSPIM or "
-        "SmartSPIM conventions, a pre-built JSON file, or a custom Python script."
-    ),
-    "multires_custom_converter": (
-        "Python module defining build_pair_manifest(cfg, output). Used when Acquisition vendor "
-        "is Custom. See examples/multires/custom_manifest_converter_example.py."
-    ),
-    "pair_manifest": (
-        "Pre-built JSON manifest (Acquisition vendor = Pre-built). Built-in vendors write "
-        "to save_path/converted/<pair_label>_pair.json unless you set an explicit path here."
-    ),
-    "reference_channel": (
-        "Channel name (e.g. 488, 555) whose overview↔ROI transform is estimated first and "
-        "applied to co-registered channels. Can also be set in the GUI shell."
-    ),
-    "experiment_name": (
-        "Slug for registration outputs under save_path/elastix_roi_to_overview/<name>/. "
-        "Change when re-running register after geometry or landmark changes to avoid "
-        "mixing old TIFFs and transforms."
-    ),
-    "multires_channels": (
-        "Per-channel overview (low mag) and ROI (high mag) paths. Each may be a TIFF or a "
-        "stitched folder. Browse offers Select file… or Select folder…. Optional metadata "
-        "sidecars when not auto-discovered beside the volume."
-    ),
-    "multires_channel_overview": (
-        "Low-mag overview volume: a single TIFF or a stitched plane-per-file folder. "
-        "Browse → Select file… or Select folder…."
-    ),
-    "multires_channel_roi": (
-        "High-mag ROI volume: a single TIFF or a stitched folder. "
-        "Browse → Select file… or Select folder…."
-    ),
-    "multires_channel_overview_meta": (
-        "Required for mesoSPIM stitched overview folders (anchor tile *_meta.txt). "
-        "SmartSPIM: metadata.txt/json when not auto-discovered beside the stack. "
-        "Optional for a TIFF whose sidecar sits next to the file."
-    ),
-    "multires_channel_roi_meta": (
-        "Required for a stitched ROI folder. Optional for a TIFF whose sidecar sits "
-        "next to the file, or SmartSPIM metadata.txt/json beside the stack."
-    ),
-    "geometry_mode": (
-        "metadata: use manifest motor geometry only. hybrid: refine overview↔ROI alignment "
-        "with landmarks from match-points (set fit mode below)."
-    ),
-    "landmark_fit_mode": (
-        "Transform model for landmark-based geometry in hybrid mode: similarity, affine, "
-        "or rigid."
-    ),
-    "overlap_margin_um": (
-        "Extra margin (µm) around the overview/ROI overlap region. Use negative values "
-        "to shrink the working canvas and save memory."
-    ),
-    "geometry_check_level": (
-        "How much data multires check-geometry loads: metadata-only (fast, manifest math "
-        "only), slice-qc (one mid-plane pair), or full (overlap crop + ROI resample — "
-        "slow on HDD; use slice-qc for a first pass on Windows)."
-    ),
-    "write_full_overview_canvas": (
-        "When enabled, registration writes a full-overview registered canvas in addition "
-        "to overlap crops (needed for some import-annotations workflows)."
-    ),
-    "import_annotations": (
-        "ROI-native points_csv / mask_tiff to warp onto the overview grid. Convert "
-        "vendor exports first, add paths here, then run Import annotations."
-    ),
-}
 
 _TOOLTIPS_BY_WORKFLOW: dict[str, dict[str, str]] = {
     "brain": _BRAIN,
     "spinal": _SPINAL,
-    "multires": _MULTIRES,
 }
 
 

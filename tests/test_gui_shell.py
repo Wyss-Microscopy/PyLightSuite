@@ -26,31 +26,6 @@ def test_detect_workflow_spinal() -> None:
     assert detect_workflow(raw) == "spinal"
 
 
-def test_detect_workflow_multires() -> None:
-    raw = {"sample": {"name": "x"}, "multires": {"pair_label": "pair1", "pair_manifest": "/p.json"}}
-    assert detect_workflow(raw) == "multires"
-
-
-def test_detect_workflow_multires_vendor_only() -> None:
-    raw = {
-        "sample": {"name": "x", "save_path": "/out"},
-        "multires": {
-            "vendor": {"suite": "smartspim"},
-            "geometry_mode": "metadata",
-        },
-    }
-    assert detect_workflow(raw) == "multires"
-
-
-def test_detect_workflow_brain_with_multires_link() -> None:
-    raw = {
-        "sample": {"name": "x"},
-        "atlas": {"provider": "allen"},
-        "multires": {"config": "examples/config/multiresolution/gilda_tg14_multires.yaml"},
-    }
-    assert detect_workflow(raw) == "brain"
-
-
 def test_load_project_brain(tmp_path: Path) -> None:
     cfg = tmp_path / "brain.yaml"
     data = {

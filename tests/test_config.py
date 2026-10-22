@@ -9,6 +9,7 @@ import yaml
 
 from lightsuite.config.loader import load_config, save_orientation_to_config
 from lightsuite.config.models import BrainPipelineConfig, DetectionConfig
+from lightsuite.exceptions import LightsuiteConfigError
 
 
 def test_detection_threshold_order() -> None:
@@ -42,7 +43,7 @@ def test_source_channels_requires_planeperfile(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump(config_data), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="planeperfile"):
+    with pytest.raises(LightsuiteConfigError, match="planeperfile"):
         load_config(config_path)
 
 

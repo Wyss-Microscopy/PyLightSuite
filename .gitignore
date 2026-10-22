@@ -2,18 +2,16 @@ scripts/lsfm_atlas_inspect/.venv/
 scripts/lsfm_atlas_inspect/lsfm_atlas_inspect_out/
 
 .venv/
-.cursor_tmp_panels/
 __pycache__/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 *.egg-info/
+dist/
+build/
 
 .DS_Store
-
-*.asv
-script_analyze_slices.m
-script_analyze_slices_in_batch.m
-batch_run_colm_suite.m
-*CellClassifierNet.mat
+.ipynb_checkpoints/
 
 # Local analysis figures (write under sample.save_path/plots instead)
 plots/

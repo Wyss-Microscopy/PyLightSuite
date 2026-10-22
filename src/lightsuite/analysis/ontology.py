@@ -61,7 +61,7 @@ def _parse_ccf_id(term_label: object) -> int | None:
 
 
 def _resolve_allen_membership_csv(atlas_dir: Path | None) -> Path | None:
-    """Locate the Allen ABC membership CSV (atlas dir → env → atlas path → cwd glob)."""
+    """Locate the Allen ABC membership CSV (env → atlas dir → LIGHTSUITE_ATLAS_PATH → cwd glob)."""
     env = os.environ.get("LIGHTSUITE_ALLEN_PARCELLATION_CSV", "").strip()
     if env:
         env_path = Path(env).expanduser()

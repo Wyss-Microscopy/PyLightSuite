@@ -103,21 +103,6 @@ def test_volume_layout_from_labeled_axes_zyx_rat_shape() -> None:
     assert (ny2, nx2, nz2, mode2) == (2121, 2843, 2086, "memmap_yxz")
 
 
-@pytest.mark.skipif(
-    not Path("/media/gbm/NVME2/ALICe-pipelines-data/rat/CTR-stitched.tif").is_file(),
-    reason="rat sample not mounted",
-)
-def test_discover_rat_stitched_zyx_stack() -> None:
-    discovery = discover_tiff_stack(
-        Path("/media/gbm/NVME2/ALICe-pipelines-data/rat"),
-        tiff_type=TiffLayout.CHANNEL_PER_FILE,
-    )
-    assert discovery.stack_read_mode == "memmap_zyx"
-    assert discovery.ny == 2843
-    assert discovery.nx == 2086
-    assert discovery.nz == 2121
-
-
 def test_channelperfile_rejects_many_single_plane_tiffs(tmp_path: Path) -> None:
     folder = tmp_path / "ch1"
     folder.mkdir()

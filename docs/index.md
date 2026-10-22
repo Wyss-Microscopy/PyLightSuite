@@ -1,85 +1,55 @@
-# LightSuite (Python)
+# PyLightSuite
 
-**LightSuite** registers large microscopy volumes to standard brain atlases and exports atlas-space intensities. The Python version runs as a command-line tool (`lightsuite`) with optional Napari GUIs for manual registration refinement.
+**PyLightSuite** (the `lightsuite` Python package) registers large lightsheet microscopy volumes to standard anatomical atlases, then exports atlas-space volumes, per-region intensity tables, and imported cell coordinates. It runs from the command line (`lightsuite`), and its interactive stages open in [Napari](https://napari.org).
 
-## What works today
+It is a Python port of the registration core of the [original MATLAB LightSuite](https://github.com/dimokaramanlis/LightSuite).
 
-| Workflow | Status |
-|----------|--------|
-| **Brain lightsheet** (3D whole-brain volumes) | Preprocess → check orientation → init registration → match points → register → export |
-| **Multiresolution** (overview ↔ ROI) | Manifest → match points (optional) → check geometry → register ([usage guide](usage_multiresolution.md)) |
-| **Spinal cord lightsheet** | Preprocess → straighten → register → export → per-sample `region-stats` ([usage guide](usage_spinal_cord.md)) |
-| **Widefield coronal slices** | [MATLAB only](usage_slice.md) |
+## Workflows
 
-See **[Python vs MATLAB](python_vs_matlab.md)** for features that are **not implemented in Python** (cell detection, slice module, CZI reader, spinal cohort analysis, GPU-accelerated detection).
+| Workflow | Stages | Guide |
+|----------|--------|-------|
+| **Brain lightsheet** | preprocess → check-orientation → init-registration → align-slices\* → match-points\* → register → export → view-registration\* | [Brain lightsheet](usage_lightsheet_brain.md) |
+| **Spinal cord** | check-orientation → preprocess → straighten → align-longitudinal → init-registration → match-points\* → register → export → region-stats | [Spinal cord](usage_spinal_cord.md) |
+| **External annotations** | convert-annotations → import-annotations (after register) | [Annotation import](annotation_import.md) |
 
-### Brain pipeline capabilities
+\* optional stage.
 
-- TIFF discovery (channel-per-file and plane-per-file layouts)
-- Downsampling to registration resolution (default 20 µm)
-- Interactive orientation checker (Napari 3D volume GUI)
-- Coarse similarity alignment (Open3D ICP)
-- Interactive control-point matching (Napari dual-pane GUI)
-- Deformable B-spline registration (Elastix 5.1)
-- Export of atlas-space registered volumes (TIFF) and parcellation intensity tables
-- Allen and Perens brain atlas providers
-- External annotation import (`points_csv`, `mask_tiff`)
+## Start here
 
-## Quick start
+1. **[Install](installation.md)** PyLightSuite, Elastix, BCPD and an atlas.
+2. Copy one of config.yaml template from [`examples/`](https://github.com/Wyss-Microscopy/PyLightSuite/tree/main/examples) and edit its paths. Or create it using the GUI by filling the paths and selecting the options. 
+3. Check the setup: `uv run lightsuite doctor -c my_sample.yaml`.
+4. Follow the workflow guide, or run all stages in order with `uv run lightsuite brain run -c my_sample.yaml` (or `spinal run`).
 
 ```bash
-# Install (see Installation guide)
-uv sync --extra dev --extra gui
-
-# Verify environment
-uv run lightsuite doctor -c examples/brain_lightsheet.yaml
-
-# Run the brain pipeline (or orchestrate with run)
-uv run lightsuite brain run -c my_sample.yaml --through match-points
-# Step by step:
-uv run lightsuite brain preprocess           -c my_sample.yaml
-uv run lightsuite brain check-orientation    -c my_sample.yaml
-uv run lightsuite brain init-registration    -c my_sample.yaml
-uv run lightsuite brain match-points         -c my_sample.yaml
-uv run lightsuite brain register             -c my_sample.yaml
-uv run lightsuite brain export               -c my_sample.yaml --save-volume --write-csv
-
-# Spinal cord (see usage_spinal_cord.md)
-uv run lightsuite spinal preprocess           -c my_spinal.yaml
-uv run lightsuite spinal straighten           -c my_spinal.yaml
-uv run lightsuite spinal init-registration    -c my_spinal.yaml
+uv run lightsuite brain stages -c my_sample.yaml     # checklist of done / pending stages
+uv run lightsuite gui -c my_sample.yaml              # run stages from one Napari window
 ```
 
-Copy [`examples/brain_lightsheet.yaml`](../examples/brain_lightsheet.yaml) (or [`examples/spinal_cord.yaml`](../examples/spinal_cord.yaml) for spinal cord), edit paths and voxel size, then follow the [brain lightsheet guide](usage_lightsheet_brain.md). See [`examples/README.md`](../examples/README.md) for the full config index.
+## Supported data
 
-## Hardware recommendations
+| | Supported |
+|---|-----------|
+| **Input** | Stitched TIFF: one multi-page TIFF per channel (`channelperfile`, eg. mesoSPIM) or one TIFF per Z plane (`planeperfile`, e.g. Terastitcher output, SmartSPIM) |
+| **Brain atlases** | Allen CCF v3 (10 µm), Perens LSFM (20 µm), BrainGlobe atlases (`atlas` extra) |
+| **Spinal atlas** | Fiederling et al. 2021 |
+| **Output** | Multi-page TIFF volumes, CSV/JSON region tables, NPZ/CSV coordinates |
 
-| Task | Recommendation |
-|------|----------------|
-| Preprocess + registration | Workstation with fast SSD scratch space (≥50 GB free; 500 GB+ for very large brains) |
-| Match-points GUI | Display with enough resolution for dual-pane Napari; `--extra gui` install |
+CZI and Imaris `.ims` volumes are not read directly, export them to TIFF first.
 
-## Supported input formats (brain)
+## Not in PyLightSuite
 
-| Format | Status |
-|--------|--------|
-| Multi-page TIFF, channel per file (`channelperfile`) | Supported |
-| One TIFF per Z plane (`planeperfile`) | Supported |
-| CZI | Not implemented — export to TIFF first |
-| Imaris `.ims` | Spot conversion helper for spinal cord; full volume reader not implemented |
+Built-in cell detection, the widefield coronal slice module, probe tracing, the CZI reader and spinal cohort NNMF analysis remain in the [original MATLAB LightSuite](https://github.com/dimokaramanlis/LightSuite). For cell counts, run any detection tool and bring its output in with [annotation import](annotation_import.md).
 
-Registered outputs are written as **TIFF** (not OME-Zarr).
+## All guides
 
-## Documentation map
-
-1. **[Installation](installation.md)** — Python, `uv`, Elastix, atlas files
-2. **[Python vs MATLAB](python_vs_matlab.md)** — feature parity and gaps
-3. **[Brain lightsheet usage](usage_lightsheet_brain.md)** — YAML config, CLI stages, outputs, GUI
-4. **[Multiresolution registration](usage_multiresolution.md)** — overview ↔ ROI alignment (mesoSPIM, SmartSPIM)
-5. **[Spinal cord](usage_spinal_cord.md)** — Python spinal pipeline
-6. **[Slice module](usage_slice.md)** — MATLAB workflow (not in Python)
+1. **[Installation](installation.md)**: Python environment, Elastix, BCPD, atlases, tests, troubleshooting
+2. **[Brain lightsheet](usage_lightsheet_brain.md)**: brain config, every stage, outputs, tuning
+3. **[Spinal cord](usage_spinal_cord.md)**: spinal config, every stage, region statistics
+4. **[Annotation import](annotation_import.md)**: external cells and masks into atlas space
+5. **[Registration spaces](registration_spaces.md)**: atlas space vs sample space outputs
+6. **[Configuration reference](config_reference.md)**: every YAML key and its default
 
 ## Getting help
 
-- Run `uv run lightsuite doctor` to diagnose missing dependencies
-- Open an [issue on GitHub](https://github.com/dimokaramanlis/LightSuite/issues) with OS, Python version, config (redacted paths), and the full error message
+Run `uv run lightsuite doctor` first. If the problem remains, open an [issue on GitHub](https://github.com/Wyss-Microscopy/PyLightSuite/issues) with your OS, the `doctor` output, the config file (paths can be redacted) and the full error message.

@@ -1,606 +1,368 @@
-# Brain lightsheet analysis (Python)
+# Brain lightsheet
 
-This guide walks through the Python brain pipeline: from stitched TIFF stacks to atlas-space registered volumes and regional intensity tables.
+This guide takes a stitched whole-brain lightsheet volume to atlas-space registered volumes and per-region intensity tables.
 
-The workflow mirrors the MATLAB script `demos/ls_analyze_lightsheet_volume.m`, but uses a **YAML config file** and **`lightsuite brain`** CLI commands instead of editing an `opts` struct in MATLAB.
+Before you start, finish the [installation](installation.md): PyLightSuite with the `gui` extra, Elastix 5.1.0, BCPD, and an Allen, Perens or BrainGlobe atlas. You also need:
 
----
-
-## Before you start
-
-You will need:
-
-- Stitched TIFF data (Terastitcher, BigStitcher, or similar)
-- **Voxel size** in microns (`[x, y, z]`)
-- Fast scratch space for intermediate files
-- Elastix 5.1.0 and Allen (or Perens) atlas NIfTIs installed ([Installation](installation.md))
-- Napari GUI extras for the match-points step: `uv sync --extra gui`
+- the stitched TIFF data (Terastitcher, BigStitcher, SmartSPIM or similar),
+- the native **voxel size** in µm, as `[x, y, z]`,
+- a fast local scratch folder with enough free space ([hardware](installation.md#hardware-and-storage)).
 
 ---
 
 ## Pipeline overview
 
-| Step | CLI command | Type | MATLAB equivalent |
-|:----:|-------------|------|-------------------|
-| 0 | `lightsuite doctor` | Check | `check_lightsuite_installation.m` |
-| 1 | `lightsuite brain preprocess` | Automated | `preprocessLightSheetVolume.m` |
-| 2 | `lightsuite brain check-orientation` | **Manual (GUI)** | `getBrainOrientation.m` |
-| 3 | `lightsuite brain init-registration` | Automated | `initializeRegistration.m` |
-| 4 | `lightsuite brain align-slices` | **Manual (GUI)** | *(new — AP slice correspondence)* |
-| 5 | `lightsuite brain match-points` | **Manual (GUI)** | `matchControlPoints_unified.m` |
-| 6 | `lightsuite brain register` | Automated | `multiobjRegistration.m` |
-| 7 | `lightsuite brain export` | Automated | `generateRegisteredBrainVolumes.m` |
-| 8 | `lightsuite brain import-annotations` | Automated | `transformPointsToAtlas.m` |
-| 9 | `lightsuite brain view-registration` | **Manual (GUI)** | *(Napari — registration review, divisions, import previews)* |
+| # | Stage | Kind | Writes |
+|:-:|-------|------|--------|
+| 1 | `preprocess` | Automatic | `chan_N_sample_register_20um.tif`, `regopts.json`, `sample_reference.json` |
+| 2 | `check-orientation` | GUI | `brain_orientation.txt` |
+| 3 | `init-registration` | Automatic | `regopts.json` (coarse transform), `qc/initial/` previews |
+| 4 | `align-slices` | GUI, optional | `slice_correspondence.json` |
+| 5 | `match-points` | GUI, optional | `atlas2histology_tform.json` |
+| 6 | `register` | Automatic | `transform_params.json`, B-spline files, `qc/affine/` and `qc/bspline/` previews |
+| 7 | `export` | Automatic | `volume_registered/`, `stats/` region tables |
+| 8 | `import-annotations` | Automatic, optional | `imports/` atlas coordinates for external cells and masks |
+| 9 | `view-registration` | GUI, optional | (review only) |
 
-Built-in cell detection is **not implemented in Python**; set `detection.enabled: false` and use `import-annotations` with external `points.csv` / `mask.tif` exports (see [Annotation import](annotation_import.md)). For other MATLAB-only features, see [Python vs MATLAB](python_vs_matlab.md).
+Every command takes the config with `-c`. Run them from the repository folder as `uv run lightsuite brain <stage> -c my_mouse.yaml`.
 
 ---
 
 ## Configuration
 
-Create a YAML file for each sample. Start from the example:
+Copy the template and edit it:
 
 ```bash
 cp examples/brain_lightsheet.yaml my_mouse.yaml
 ```
 
-### Minimal example
+The keys you must set:
 
 ```yaml
 sample:
-  name: M001
+  name: M001                          # used in output file names
   source:
     format: tiff_stack
-    path: /data/M001/stitched
-    tiff_type: channelperfile    # or planeperfile
-  scratch: /fastssd/lightsuite_scratch/M001
-  save_path: /data/M001/lightsuite_results
-  voxel_um: [5.26, 5.26, 5.0]    # required for preprocess
+    path: /data/M001/stitched         # folder with the TIFFs
+    tiff_type: channelperfile         # or planeperfile (one TIFF per Z plane)
+  scratch: /fastssd/scratch/M001      # fast local disk for temporary files
+  save_path: /data/M001/lightsuite    # all results and checkpoints
+  voxel_um: [5.26, 5.26, 5.0]         # native voxel size [x, y, z] in µm
 
 atlas:
-  provider: allen                 # or perens
+  provider: allen                     # or perens (resolution_um: 20)
   resolution_um: 10
   atlas_dir: /atlases/allen_ccf_10um
 
 registration:
-  resolution_um: 20               # registration working resolution
-  channel_primary: 1              # autofluorescence / structural channel
-  channel_secondary: 2            # optional second channel for dual MI
-  bspline_spatial_scale_mm: 0.64
-  bspline_bending_weight: 2.0     # deformation smoothness; raise if contours look wavy
-  control_point_weight: 0.2
-  augment_points: false
-  orientation: [1, 2, 3]          # or omit; uses brain_orientation.txt if present
+  resolution_um: 20                   # working resolution for registration
+  channel_primary: 1                  # structural / autofluorescence channel
+  channel_secondary: 2                # optional second channel (dual MI); remove if unused
 
 detection:
-  enabled: false                  # not yet implemented in Python
-
-export:
-  save_registered_volume: false
-  write_cells_csv: true
-
-import:
-  write_csv: true
-  annotations:
-    - format: points_csv
-      path: /data/annotations/cfos_cells.csv
-      label: cfos_cells
-    - format: mask_tiff
-      path: /data/annotations/region_mask.tif
-      label: hippocampus
+  enabled: false                      # built-in detection is not available; use import-annotations
 ```
 
-See [Annotation import](annotation_import.md) for the native sample-space convention and tool conversion notes.
-
-Validate before running:
+Check the config before running:
 
 ```bash
 uv run lightsuite brain validate-config -c my_mouse.yaml
 uv run lightsuite doctor -c my_mouse.yaml
+uv run lightsuite config explain -c my_mouse.yaml     # print the resolved paths and settings
 ```
 
-### Configuration reference
+Every key and its default is listed in the [configuration reference](config_reference.md). You can also create a starter config interactively with `uv run lightsuite config init brain`.
 
-#### Sample
+### Several channels in separate folders
 
-| Field | Description |
-|-------|-------------|
-| `sample.name` | Short sample identifier (used in output filenames) |
-| `sample.source.path` | Folder containing TIFF files (optional when `source.channels` is set; defaults to first channel folder) |
-| `sample.source.tiff_type` | `channelperfile` (BigStitcher-style) or `planeperfile` (Terastitcher-style) |
-| `sample.source.channels` | Optional list of planeperfile roots (one folder per channel). Channel index follows list order. Requires `tiff_type: planeperfile`. |
-| `sample.scratch` | Fast temp directory; **required disk space** for `planeperfile` XY-downsampled memmap (~`2 × ny × nx × nz × (vx/registres)²` bytes) plus detection scratch |
-| `compute.workers` | Parallel slice workers for `channelperfile` stacks (default `4`). **`planeperfile` always uses 1 worker** — many TIFFs are faster read sequentially |
-| `compute.max_in_memory_scratch_gb` | XY-downsampled scratch kept in RAM up to this size (default `24`); larger stacks use `sample.scratch` memmap |
-| `sample.save_path` | All pipeline outputs and checkpoints |
-| `sample.voxel_um` | Native voxel size `[x, y, z]` in µm — **required** for preprocess |
-
-#### Atlas
-
-| Field | Description |
-|-------|-------------|
-| `atlas.provider` | `allen` (10 µm) or `perens` (20 µm) |
-| `atlas.resolution_um` | Atlas resolution in µm |
-| `atlas.atlas_dir` | Directory with template + annotation NIfTIs; add `annotation_boundary_10.nii.gz` for Allen atlas boundary overlays (or use `LIGHTSUITE_ATLAS_PATH`) |
-
-#### Registration
-
-| Field | Description | Default |
-|-------|-------------|---------|
-| `registration.resolution_um` | Downsample target for registration volumes | `20` |
-| `registration.channel_primary` | Primary channel for alignment | `1` |
-| `registration.channel_secondary` | Optional second channel for dual-channel mutual information | `null` |
-| `registration.bspline_spatial_scale_mm` | B-spline grid spacing in mm; smaller = finer warping, but also more free parameters to constrain | `0.64` |
-| `registration.bspline_bending_weight` | Weight of the Elastix `TransformBendingEnergyPenalty` smoothness term; `0` disables it (MATLAB parity) | `2.0` |
-| `registration.control_point_weight` | Landmark weight in Elastix (0–1) | `0.2` |
-| `registration.augment_points` | Add thinned auto-landmarks to user control points | `false` |
-| `registration.use_slice_correspondence_affine` | Compose align-slices correspondence into the affine pre-warp before B-spline | `true` |
-| `registration.use_slice_correspondence_landmarks` | Add align-slices anchors as extra B-spline landmarks in register | `true` |
-| `registration.correspondence_landmark_weight` | Minimum landmark metric weight when correspondence landmarks are merged | `0.2` |
-| `registration.correspondence_landmark_max_count` | Cap on total B-spline landmark pairs after merging correspondence anchors | `96` |
-| `registration.orientation` | Axis permutation, e.g. `[1, 2, 3]`; flips use negative indices | auto |
-
-#### Export
-
-| Field | Description | Default |
-|-------|-------------|---------|
-| `export.save_registered_volume` | Write atlas-space TIFFs under `volume_registered/` | `false` |
-| `export.write_cells_csv` | Write parcellation intensity CSVs | `true` |
-
----
-
-## Step-by-step commands
-
-Run all commands from the repository root with your config path.
-
-### 0. Check environment
-
-```bash
-uv run lightsuite doctor -c my_mouse.yaml
-```
-
-Fix any failed checks (Elastix, atlas paths) before continuing.
-
-### 1. Preprocess
-
-Downsamples each channel to registration resolution and writes checkpoint files.
-
-```bash
-uv run lightsuite brain preprocess -c my_mouse.yaml
-```
-
-**Outputs** in `save_path`:
-
-- `chan_{N}_sample_register_{20}um.tif` — one multi-page TIFF per channel
-- `regopts.json` — volume metadata and paths (replaces `regopts.mat`)
-- `sample_reference.json` — native sample-space grid for external segmentation exports
-
-### 2. Check orientation (manual)
-
-Compare your sample against the atlas before coarse registration. Opens a Napari viewer with the atlas volume on the left and the permuted sample on the right.
-
-```bash
-uv run lightsuite brain check-orientation -c my_mouse.yaml
-```
-
-Requires `uv sync --extra gui`.
-
-**Workflow:**
-
-1. Use the three dropdowns to map sample dimensions to atlas dimensions (with optional flips).
-2. Click **Update preview** after each change.
-3. Scroll through slices and use Napari's **change order of visible axes** control (**Ctrl+E**) to inspect different projections.
-4. When anatomical axes align (AP, DV, LR), click **Save orientation && close**.
-
-The viewer uses a **dual-panel layout** (atlas left, sample right) with one 3D volume per side. The sample is always shown at native resolution; the atlas is resampled to match for display when sizes differ.
-
-**Output:** `brain_orientation.txt` — used by init-registration and downstream stages.
-
-If you already know the permutation, set `registration.orientation` in YAML instead.
-
-### 3. Initial registration
-
-Coarse similarity alignment of sample to atlas using BCPD (or Open3D ICP fallback) on gradient point clouds.
-
-```bash
-uv run lightsuite brain init-registration -c my_mouse.yaml
-```
-
-Defaults match MATLAB (`cloudthres=5`, `pcdownsample=0.1` inside `extractSamplePoints.m`).
-You normally do not set these in YAML. If `init_registration_diagnostics.json` reports a
-**sparse sample cloud** and coarse alignment looks poor, see
-[Advanced init-registration tuning](#advanced-init-registration-tuning) below.
-
-**Outputs:**
-
-- Updated `regopts.json` (`original_trans`, auto control point pairs)
-- `brain_orientation.txt` (if orientation was set in config)
-- `dim{1,2,3}_initial_registration.png` — eight sample slices per axis with warped atlas annotation edges overlaid (MATLAB `plotAnnotationComparison` style)
-
-If orientation is wrong, set `registration.orientation` in YAML or edit `brain_orientation.txt`, then re-run init-registration.
-
-#### Advanced init-registration tuning
-
-These parameters affect only the **coarse BCPD step** (`extractSamplePoints.m` port). They are
-omitted from example configs because MATLAB defaults work for most brains.
-
-| Field | Default | When to change |
-|-------|---------|----------------|
-| `registration.cloud_threshold` | `5.0` (MATLAB `cloudthres`) | Lower (e.g. `3.0`) if diagnostics warn of a sparse sample cloud and `dim*_initial_registration.png` looks under-constrained |
-| `registration.sample_cloud_subsample` | `0.1` (hardcoded in MATLAB) | Rarely change; fixed at MATLAB parity. Not listed in example YAMLs |
-
-```yaml
-registration:
-  cloud_threshold: 3.0   # advanced only — more gradient points for sparse samples
-```
-
-### 4. Align slices (optional, recommended)
-
-Opens a Napari dual-pane GUI to match **sample anatomy to the correct atlas plane** along **all three volume axes** (Y, X, Z), before placing control points.
-
-```bash
-uv run lightsuite brain align-slices -c my_mouse.yaml
-```
-
-Requires `uv sync --extra gui`.
-
-**Workflow:**
-
-1. Use the **Volume axis** control (1=Y, 2=X, 3=Z) to choose which axis you are aligning.
-2. For each axis, confirm ~20 evenly spaced anchor slices:
-   - Sample slice is shown on the **left** (fixed).
-   - Scroll the atlas on the **right** with **PgUp** / **PgDn**, the atlas plane spinbox, or **mouse wheel over the atlas panel**.
-3. When anatomy matches, press **Enter** or click **Confirm slice** — advances to the next anchor.
-4. After the last anchor on an axis, you are prompted to continue on the next axis (or use **Next axis ▶**).
-5. Use **←** / **→** to revisit anchors; switch axes any time with the dropdown.
-6. Click **Save && Close** when finished (all three axes recommended).
-
-**Output:**
-
-- `slice_correspondence.json` (v2) — per-axis sample index ↔ atlas plane maps under `axes.{1,2,3}`
-
-`match-points` reads this file and pre-fills using the curve for each cut axis. Older v1 files (single AP axis) are still loaded and migrated on save.
-
-**Automated (all three axes, no GUI):**
-
-```bash
-uv run lightsuite brain align-slices -c my_mouse.yaml --headless
-```
-
-### 5. Match control points (optional)
-
-Opens a Napari dual-pane GUI: sample on the left, atlas on the right.
-
-**Optional:** you can skip this step and run **register** using only the auto control point pairs written by **init-registration** (same as MATLAB when `*tform.mat` is absent).
-
-```bash
-uv run lightsuite brain match-points -c my_mouse.yaml
-```
-
-Requires `uv sync --extra gui`.
-
-**Workflow:**
-
-1. Navigate slices with the **Navigation** panel on the right:
-   - **←** / **→** arrow keys for previous/next chooselist slice (or use the panel buttons)
-   - **Atlas plane** spinbox, **PgUp** / **PgDn**, or **mouse wheel over the atlas panel** to scroll along the atlas cut axis until anatomy matches the sample (like MATLAB)
-   - Change **Slice #** and click **Show slice** to jump to a specific chooselist index
-   - Toggle the atlas boundary overlay with **O** or the checkbox in Navigation
-   - The spinbox also refreshes when you press Enter or change the value
-   - Do **not** use Napari’s bottom dimension slider — it does not switch chooselist slices
-2. Click corresponding landmarks on **sample** (left) and **atlas** (right). Markers are **numbered**; pair **1** on the sample matches pair **1** on the atlas, and so on.
-3. When point counts match on a slice, the affine fit updates automatically and the **red atlas boundary overlay** on the sample refits (toggle with **O**).
-4. **Backspace** removes the most recently placed point (on whichever side you clicked last).
-5. Use **Clear slice points** to reset the current slice.
-6. Click **Save && Close** when finished.
-
-**Tips:**
-
-- Use at least **16 matched pairs** spread along the anterior–posterior axis; more is better.
-- Good landmarks: ventricle boundaries, corpus callosum, major nuclei outlines.
-- Avoid damaged tissue; estimate where structures should be instead of bending the atlas into artifacts.
-
-**Output:**
-
-- `atlas2histology_tform.json` — control points and manual alignment (replaces `atlas2histology_tform.mat`)
-
-For automated tests only:
-
-```bash
-uv run lightsuite brain match-points -c my_mouse.yaml --headless
-```
-
-### 6. Register (Elastix B-spline)
-
-Runs affine + deformable registration using your control points and Elastix.
-
-When `slice_correspondence.json` exists with confirmed anchors (from **align-slices**), **register**:
-
-1. Composes a correspondence-informed affine correction before warping the atlas (step 1).
-2. Adds anchor tissue centroids as extra B-spline landmarks, constraining through-plane alignment during Elastix (step 2).
-
-This applies the axis-wise slice-index maps as geometry initialization rather than hard-filtering auto control points. Disable either step with `registration.use_slice_correspondence_affine: false` or `registration.use_slice_correspondence_landmarks: false`.
-
-```bash
-uv run lightsuite brain register -c my_mouse.yaml
-```
-
-Faster (lower quality) single-resolution schedule:
-
-```bash
-uv run lightsuite brain register -c my_mouse.yaml --single-step
-```
-
-**Outputs:**
-
-- `transform_params.json` — full transform metadata (replaces `transform_params.mat`)
-- `bspline_samp_to_atlas_20um.txt` — inverse B-spline (sample → atlas)
-- `bspline_atlas_to_samp_20um.txt` — forward B-spline
-- `registration_diagnostics.json` — registration checkpoint: affine/B-spline residuals, annotation overlap, GOOD/MODERATE/POOR status
-- `affine_fit_stats.json` — affine landmark residuals (voxels): median/p95/max, auto vs manual, coarse baseline
-- `correspondence_affine_stats.json` — slice-correspondence affine correction (anchor count, residual before/after)
-- `correspondence_landmark_stats.json` — correspondence B-spline landmarks merged into Elastix
-- `{name}_dim{1,2,3}_affine_registration.png` — eight sample slices per axis with warped atlas region outlines overlaid (same style as `dim*_initial_registration.png`)
-- `{name}_dim{1,2,3}_bspline_registration.png` — same layout after B-spline
-- `elastix_temp/` — Elastix working directory (keep until register finishes)
-
-#### Wavy or over-warped B-spline contours
-
-If the affine preview looks right but the B-spline preview shows tangled, wandering region
-outlines, the deformation has too many degrees of freedom for the amount of image evidence
-driving it — not a bad initialization.
-
-Elastix draws ~5000 Mattes MI samples per iteration from a single small `SampleRegionSize`
-cube. On a wide acquisition canvas (a 2048² mesoSPIM frame where the brain fills under a
-third of the field, say) the B-spline grid has tens of thousands of parameters, most control
-points sit over background, and each one receives only a handful of informative updates. The
-rest of its trajectory is a random walk. Two things keep that in check:
-
-- `registration.bspline_bending_weight` adds a smoothness prior. `2.0` is a good starting
-  point; raise it if contours still wander. `0` reproduces MATLAB, which has no penalty term.
-- `registration.bspline_spatial_scale_mm` controls how many parameters exist at all. Going
-  from `0.64` to `1.0` mm cuts the grid roughly threefold. Counter-intuitively this usually
-  *improves* landmark agreement on wide canvases, because the remaining control points are
-  each much better constrained.
-
-Check `elastix_temp/IterationInfo.0.R3.txt` to confirm the diagnosis. A `2:Metric0` column
-that is frequently exactly `0.000000` means those iterations sampled a region with no atlas
-overlap and contributed nothing; a `2:Metric1` (landmark) column that is flat across the
-finest resolution means the last pyramid level is adding noise rather than alignment.
-
-Cropping the registration volume to the brain with `registration.sample_content_crop: auto`
-reduces the wasted grid too, though it is a smaller effect than the two settings above.
-
-### 7. Export
-
-Warps channels to atlas space (default) and optionally exports atlas labels warped onto the **registration grid** (sample space). See [Registration spaces](registration_spaces.md).
-
-```bash
-uv run lightsuite brain export -c my_mouse.yaml --save-volume --write-csv
-uv run lightsuite brain export -c my_mouse.yaml --space both --save-volume --write-csv
-```
-
-Flags override YAML defaults:
-
-- `--save-volume` / `--no-save-volume`
-- `--write-csv` / `--no-write-csv`
-- `--space atlas|sample|both` — output coordinate space(s)
-
-**Outputs** in `volume_registered/`:
-
-- `chan_{NN}_registered_atlas.tif` — if `--save-volume` (atlas space)
-- `sample_space/` — warped annotation, template, division labels on registration grid
-- `chan{NN}_intensities.csv` — regional median intensity, std, volume per hemisphere
-- `chan{NN}_intensities.json` — same statistics in JSON form
-- `chan{NN}_region_stats_sample.csv` / `region_stats_sample.csv` — sample-space stats when enabled
-- `region_stats.csv` / `region_stats_top{N}.csv` — combined tidy table and wide top-N summary
-
-Allen parcellation CSV export requires `parcellation_to_parcellation_term_membership.csv` (see [Installation](installation.md)).
-
----
-
-## Full command cheat sheet
-
-```bash
-export CONFIG=my_mouse.yaml
-
-uv run lightsuite doctor -c $CONFIG
-uv run lightsuite brain validate-config -c $CONFIG
-uv run lightsuite brain preprocess -c $CONFIG
-uv run lightsuite brain check-orientation -c $CONFIG
-uv run lightsuite brain init-registration -c $CONFIG
-uv run lightsuite brain align-slices -c $CONFIG
-uv run lightsuite brain match-points -c $CONFIG
-uv run lightsuite brain register -c $CONFIG
-uv run lightsuite brain export -c $CONFIG --save-volume --write-csv
-uv run lightsuite brain import-annotations -c $CONFIG
-uv run lightsuite brain view-registration -c $CONFIG
-uv run lightsuite brain view-registration -c $CONFIG --space atlas
-```
-
-`view-registration` defaults to **sample** space (20 µm registration grid). Use `--space atlas` for the Perens/Allen export grid. The viewer shows registered channels, fine **annotation labels**, division checkboxes (all divisions on by default), imported points/masks, and **resampled ROI previews** from `import.annotations` before `import-annotations` runs. When a `multires:` block links a completed multires registration, registered **ROI intensity** channels are also shown on the 20 µm grid (no segmentation required). Atlas-space channels are warped on the fly when export TIFFs are missing. Warped atlas **template** and **annotation** labels load from `volume_registered/sample_space/` when present — run `lightsuite brain export --space sample` first (or set `export.spaces: [sample]`).
-
-Atlas-space Napari QC applies the same canonical coronal orientation used in registration plots (Perens coronal is no longer upside-down vs Allen). Annotation volumes render as **label** layers rather than float images so CCF structure ids are fully visible.
-
----
-
-## Output file layout
-
-```
-<save_path>/
-├── regopts.json                          # Preprocess + init-registration state
-├── sample_reference.json                 # Native grid for external segmentation
-├── brain_orientation.txt                 # Axis permutation
-├── slice_correspondence.json             # AP sample ↔ atlas plane map (align-slices)
-├── correspondence_affine_stats.json      # Correspondence affine in register
-├── correspondence_landmark_stats.json    # Correspondence B-spline landmarks
-├── atlas2histology_tform.json            # Manual control points
-├── transform_params.json                 # Final registration parameters
-├── bspline_samp_to_atlas_20um.txt
-├── bspline_atlas_to_samp_20um.txt
-├── chan_1_sample_register_20um.tif       # Downsampled volumes (per channel)
-├── dim1_initial_registration.png
-├── {name}_dim1_affine_registration.png
-├── {name}_dim1_bspline_registration.png
-├── elastix_temp/                         # Elastix forward run
-└── volume_registered/
-    ├── chan_01_registered_atlas.tif
-    ├── chan01_intensities.csv          # legacy wide intensity table
-    ├── chan01_intensities.json
-    ├── chan01_region_stats.csv         # tidy per-channel table (with region names)
-    ├── region_stats.csv                # combined tidy table (brain export)
-    └── region_stats_top10.csv          # wide top-N regions per channel
-```
-
-Checkpoints use **JSON** instead of MATLAB `.mat` files. Legacy MATLAB outputs in the same folder are not read automatically — re-run the Python stages to produce JSON checkpoints.
-
----
-
-## Resuming and re-running
-
-Each stage reads checkpoints from `save_path`:
-
-| Stage | Requires |
-|-------|----------|
-| preprocess | Valid YAML, TIFF source path |
-| init-registration | `regopts.json` from preprocess |
-| match-points | `regopts.json` with `original_trans` |
-| register | `regopts.json` (with `original_trans` and auto pairs) + Elastix; `atlas2histology_tform.json` optional |
-| export | `regopts.json` + `transform_params.json` + transformix |
-
-Re-running a stage overwrites its outputs and downstream dependencies. After changing control points, re-run **register** and **export**.
-
----
-
-## Dual-channel registration
-
-If you have two structural contrasts at the same resolution (e.g. autofluorescence + fluorescent label), set:
-
-```yaml
-registration:
-  channel_primary: 1
-  channel_secondary: 2
-  dual_channel_mi_weight_autofluor: 0.4
-  dual_channel_mi_weight_signal: 0.4
-```
-
-Both channels are preprocessed in step 1; register uses dual fixed-image mutual information in Elastix.
-
-### Multi-channel planeperfile (Terastitcher)
-
-When each channel lives in its own folder of Z-plane TIFFs (e.g. `channel_488/RES(...)/`, `channel_561/RES(...)/`), list the roots under `source.channels` instead of running one config per channel:
+When each channel is its own folder of Z-plane TIFFs, list the folders in channel order:
 
 ```yaml
 sample:
   source:
     tiff_type: planeperfile
     channels:
-      - /data/Gilda/output/channel_488/RES(5690x5834x2052)
-      - /data/Gilda/output/channel_561/RES(5690x5834x2052)
-  save_path: /data/Gilda/output/registered_perens   # shared across channels
-
-registration:
-  channel_primary: 1
-  channel_secondary: 2
+      - /data/M001/channel_488
+      - /data/M001/channel_561
 ```
 
-All channel folders must have the same `(ny, nx, nz)` and matching slice ordering (files sorted by name). Export applies the same transform to every preprocessed channel.
+All folders must have the same image size and plane count.
 
-### SmartSPIM flat `All_Channels` (interleaved `Z*_ChN.tif`)
+### SmartSPIM `All_Channels` folders
 
-Some SmartSPIM exports keep all channels in one folder (`Z000000_Ch0.tif`, `Z000000_Ch1.tif`, …). Split into per-channel folders (up to **Ch0–Ch2**) before preprocess:
+Some SmartSPIM exports put every channel in one folder (`Z000000_Ch0.tif`, `Z000000_Ch1.tif`, …). Split it first (this creates symlinks, not copies):
 
 ```bash
-uv run lightsuite brain split-smartspim-channels -s /data/Jules/All_Channels
-# creates All_Channels/Ch0, Ch1, … (symlinks by default; no file copies)
+uv run lightsuite brain split-smartspim-channels -s /data/M001/All_Channels
 ```
 
-Then point `source.channels` at those `ChN` directories. Cell-detection JSON → `points.csv`: see [`convert_smartspim_detection_to_lightsuite.ipynb`](../examples/notebooks/convert_smartspim_detection_to_lightsuite.ipynb) or `lightsuite brain convert-smartspim-points`.
+Then list the new `All_Channels/Ch0`, `Ch1`, … folders under `source.channels`.
 
 ---
 
-## Import external annotations
-
-After `register`, warp native sample-space coordinates or masks into atlas space.
-
-Full specification: **[Annotation import](annotation_import.md)**.
+## Running the whole pipeline
 
 ```bash
+uv run lightsuite brain run -c my_mouse.yaml
+```
+
+`run` executes the stages in order and opens each GUI stage when it is reached. Useful options:
+
+| Option | Effect |
+|--------|--------|
+| `--through register` | Stop after a stage |
+| `--from register` | Start at a stage |
+| `--resume` | Skip stages whose checkpoint already exists |
+| `--include-optional` | Also run the optional stages (align-slices, match-points, view-registration, segmentation import) that are not done yet |
+| `--force-preprocess` | Redo preprocess even if cached volumes match the config |
+
+See where a sample stands at any time:
+
+```bash
+uv run lightsuite brain stages -c my_mouse.yaml
+```
+
+Or run every stage from one window with `uv run lightsuite gui -c my_mouse.yaml`.
+
+---
+
+## Stage by stage
+
+### 1. Preprocess
+
+Reads the raw TIFFs once and downsamples each channel to the registration resolution.
+
+```bash
+uv run lightsuite brain preprocess -c my_mouse.yaml
+```
+
+Writes to `save_path`:
+
+- `chan_N_sample_register_20um.tif`: one downsampled volume per channel,
+- `regopts.json`: volume metadata used by every later stage,
+- `sample_reference.json`: the native voxel grid, needed for [annotation import](annotation_import.md).
+
+### 2. Check orientation (GUI)
+
+Tells PyLightSuite how the sample axes map onto the atlas axes.
+
+```bash
+uv run lightsuite brain check-orientation -c my_mouse.yaml
+```
+
+The atlas is on the left and the sample on the right.
+
+1. Use the three drop-downs to map each sample axis to an atlas axis, with flips if needed.
+2. Click **Update preview** after each change.
+3. Scroll through slices, and press **Ctrl+E** to cycle the viewed axes.
+4. When anterior–posterior, dorsal–ventral and left–right all agree, click **Save orientation && close**.
+
+This writes `brain_orientation.txt`. If you already know the mapping, set `registration.orientation` (e.g. `[1, -3, 2]`, negative = flipped) in the YAML and skip this stage.
+
+### 3. Init registration
+
+Coarse similarity alignment of the sample to the atlas, using BCPD on point clouds extracted from both volumes.
+
+```bash
+uv run lightsuite brain init-registration -c my_mouse.yaml
+```
+
+The log says which method ran: `Init-registration: coarse similarity alignment (BCPD)…`, or `(ICP fallback)` if BCPD was not found.
+
+Check the previews in `qc/initial/` (`dim1_initial_registration.png`, `dim2_…`, `dim3_…`): eight slices per axis with the atlas region outlines on top. The outlines should roughly follow the brain. If the brain is rotated or mirrored, fix the orientation (stage 2) and rerun this stage.
+
+If the log warns about a **sparse sample cloud** and the previews look poor, lower `registration.cloud_threshold` (default `5.0`, try `3.0`).
+
+### 4. Align slices (GUI, optional, recommended)
+
+Matches sample slices to the corresponding atlas planes along each axis. This corrects stretch or compression along an axis before control points are placed.
+
+```bash
+uv run lightsuite brain align-slices -c my_mouse.yaml
+```
+
+1. Pick the axis with **Volume axis** (1 = Y, 2 = X, 3 = Z).
+2. The sample slice is fixed on the left. Scroll the atlas on the right with **PgUp/PgDn**, the plane spinbox, or the mouse wheel over the atlas.
+3. When the anatomy matches, press **Enter** (or **Confirm slice**) to move to the next of about 20 anchors. Use **←/→** to revisit anchors.
+4. Repeat for all three axes, then click **Save && Close**.
+
+This writes `slice_correspondence.json`. `match-points` uses it to pre-select atlas planes, and `register` uses it to improve the affine step and add landmarks.
+
+### 5. Match control points (GUI, optional)
+
+Places matching landmarks on sample (left) and atlas (right) slices. You can skip it: `register` then uses only the automatic point pairs from init-registration.
+
+```bash
+uv run lightsuite brain match-points -c my_mouse.yaml
+```
+
+1. Move between slices with **←/→** or the **Navigation** panel. Scroll the atlas plane with **PgUp/PgDn**, the **Atlas plane** spinbox or the mouse wheel over the atlas. (Napari's own bottom slider does not change slices here.)
+2. Click a landmark on the sample, then the same landmark on the atlas. Points are numbered in pairs.
+3. Once a slice has matching counts, the atlas outline on the sample refits. Toggle it with **O**.
+4. **Backspace** removes the last point; **Clear slice points** resets the slice.
+5. Click **Save && Close**.
+
+Tips: place at least 16 pairs spread along the anterior–posterior axis. Ventricle edges, the corpus callosum and large nuclei make good landmarks. Avoid damaged tissue.
+
+This writes `atlas2histology_tform.json`.
+
+### 6. Register
+
+Runs Elastix: an affine step, then a B-spline (deformable) step, using the control points and, when present, the slice correspondence.
+
+```bash
+uv run lightsuite brain register -c my_mouse.yaml
+uv run lightsuite brain register -c my_mouse.yaml --single-step     # faster, lower quality
+```
+
+Outputs:
+
+- `transform_params.json`: the complete transform,
+- `bspline_samp_to_atlas_20um.txt` and `bspline_atlas_to_samp_20um.txt`: B-spline parameter files for both directions,
+- `qc/affine/{name}_dim{1,2,3}_affine_registration.png` and `qc/bspline/{name}_dim{1,2,3}_bspline_registration.png`: preview slices with atlas outlines after each step.
+
+Compare the affine and B-spline previews: the B-spline outlines should follow the tissue more closely without becoming wavy. Warnings about large landmark residuals or poor overlap are printed in the log. Elastix works in `_work/`, which is deleted when the stage succeeds.
+
+The slice-correspondence steps can be turned off with `registration.use_slice_correspondence_affine: false` and `registration.use_slice_correspondence_landmarks: false`.
+
+#### Wavy or over-warped B-spline outlines
+
+If the affine preview looks right but the B-spline preview shows tangled region outlines, the deformation has more freedom than the image data can constrain. This is common on wide camera frames where the brain fills only part of the field.
+
+- Raise `registration.bspline_bending_weight` (default `2.0`). This is a smoothness penalty; `0` turns it off.
+- Raise `registration.bspline_spatial_scale_mm` from `0.64` to about `1.0`. This coarsens the B-spline grid about threefold and often *improves* landmark agreement on wide frames.
+- Set `registration.sample_content_crop: auto` to crop the registration volume to the brain.
+
+### 7. Export
+
+Applies the transform: warps the channels into atlas space and computes per-region statistics.
+
+```bash
+uv run lightsuite brain export -c my_mouse.yaml --save-volume --write-csv
+uv run lightsuite brain export -c my_mouse.yaml --space both --save-volume --write-csv
+```
+
+| Option | Effect |
+|--------|--------|
+| `--save-volume` / `--no-save-volume` | Write the registered channel TIFFs |
+| `--write-csv` / `--no-write-csv` | Write region tables |
+| `--space atlas\|sample\|both` | Output space; `sample` warps the atlas labels onto the sample instead ([registration spaces](registration_spaces.md)) |
+
+Outputs:
+
+- `volume_registered/chan_NN_registered_atlas.tif`: each channel in atlas space (with `--save-volume`),
+- `volume_registered/sample_space/`: atlas template, labels and divisions warped onto the sample grid (with `--space sample` or `both`),
+- `stats/region_stats.csv`: one tidy table with every channel, region, hemisphere and metric,
+- `stats/region_stats_top10.csv`: the top regions per channel, one column per metric,
+- `stats/chanNN_region_stats.csv`, `stats/chanNN_intensities.csv` / `.json`: per-channel tables,
+- `stats/*_sample.csv`: the same tables computed in sample space (with `--space sample` or `both`).
+
+`region_stats.csv` columns:
+
+| Column | Meaning |
+|--------|---------|
+| `sample`, `channel`, `atlas` | Where the row comes from |
+| `parcellation_index` | Atlas label value |
+| `acronym`, `name`, `structure`, `division` | Region names |
+| `hemisphere` | `left` or `right` |
+| `metric`, `value` | e.g. `median_intensity`, `std`, `volume_mm3`; `cell_count`, `cell_density` after an import |
+
+Choose metrics with `analysis.intensity_metrics` and the top-N size with `analysis.top_n_regions`. Allen region names need `parcellation_to_parcellation_term_membership.csv` ([installation](installation.md#allen-brain-atlas-default)).
+
+### 8. Import annotations (optional)
+
+Maps cells or masks from an external detection tool into atlas space (written to `imports/`) and adds `cell_count` / `cell_density` rows to `stats/region_stats.csv`.
+
+```bash
+uv run lightsuite brain convert-annotations -c my_mouse.yaml     # vendor export → points.csv
 uv run lightsuite brain import-annotations -c my_mouse.yaml
 ```
 
-Supported formats (YAML `import.annotations`):
+The file formats and supported tools are described in [annotation import](annotation_import.md).
 
-| `format` | Input | Notes |
-|----------|-------|-------|
-| `points_csv` | CSV with `x,y,z` columns | 1-based native voxel indices; see `sample_reference.json` |
-| `mask_tiff` | 3D binary TIFF | Shape `(Y,X,Z)` at native resolution; matches `sample_reference.json` |
+### 9. View registration (GUI, optional)
 
-Outputs land in `volume_registered/` (`*_atlas_coords.npz`, optional CSV, mask TIFF).
+Opens a Napari review of the result: registered channels, atlas labels, division check boxes, and imported points or masks.
 
-**Segmented on a higher-resolution ROI?** Run [`lightsuite multires import-annotations`](usage_multiresolution.md#step-9--optional--import-segmentation-from-the-roi) first. It warps ROI-native points and masks onto the overview grid and writes them in the same `points_csv` / `mask_tiff` formats, so its outputs go straight into the `import.annotations` block above.
-
----
-
-## Region statistics (export)
-
-During `brain export` with `--write-csv`, LightSuite writes per-channel intensity parcellation tables and, when `analysis.write_tidy_csv: true` (default), long-form `chanXX_region_stats.csv` files plus a combined `volume_registered/region_stats.csv`. A wide `region_stats_top{N}.csv` (default N=10) lists the highest-ranked leaf regions per channel, with the same metrics of interest as columns.
-
-| Column | Notes |
-|--------|-------|
-| `sample`, `channel`, `atlas` | provenance |
-| `parcellation_index` | atlas label value |
-| `acronym`, `name`, `structure`, `division` | region metadata |
-| `hemisphere` | `right` / `left` |
-| `metric` | `median_intensity`, `std`, `volume_mm3` |
-| `value` | the measurement |
-
-```yaml
-analysis:
-  write_tidy_csv: true   # emit chanXX_region_stats.csv during export
-  top_n_regions: 10
-  top_n_rank_by: cell_count  # optional; default is cell_count, else first intensity metric
+```bash
+uv run lightsuite brain view-registration -c my_mouse.yaml                 # sample space (default)
+uv run lightsuite brain view-registration -c my_mouse.yaml --space atlas
 ```
 
+Sample space needs `export --space sample` (or `both`) first for the warped atlas labels.
+
 ---
 
-## Known limitations
+## Output layout
 
-See [Python vs MATLAB](python_vs_matlab.md) for the full comparison. Summary:
+```
+<save_path>/
+├── regopts.json                      # preprocess + init-registration state
+├── sample_reference.json             # native grid for annotation import
+├── chan_1_sample_register_20um.tif   # one per channel (preprocess)
+├── brain_orientation.txt             # check-orientation
+├── slice_correspondence.json         # align-slices
+├── atlas2histology_tform.json        # match-points
+├── transform_params.json             # register
+├── bspline_samp_to_atlas_20um.txt
+├── bspline_atlas_to_samp_20um.txt
+├── qc/
+│   ├── initial/dim{1,2,3}_initial_registration.png
+│   ├── affine/{name}_dim{1,2,3}_affine_registration.png
+│   └── bspline/{name}_dim{1,2,3}_bspline_registration.png
+├── stats/                            # export: region_stats.csv, region_stats_top10.csv, chanNN_*.csv
+├── imports/                          # import-annotations: *_atlas_coords.npz, *_sample_coords.npz
+├── volume_registered/
+│   ├── chan_01_registered_atlas.tif  # export --save-volume
+│   └── sample_space/                 # export --space sample|both
+└── _work/                            # temporary Elastix folders, removed on success
+```
 
-- **Cell detection** — not implemented in Python; preprocessing warns if `detection.enabled: true`
-- **Slice module, CZI reader, spinal cohort analysis, GPU detection** — MATLAB only
-- **Registered volume format** — TIFF only (`export.registered_volume_format: tiff`)
-- **Perens division names** — cross-atlas division grouping fills in only where Perens CCF ids match the Allen ontology
+## Rerunning stages
+
+Each stage reads the checkpoints of the stages before it from `save_path`. Rerunning a stage overwrites its outputs, so rerun everything after it too. For example, after changing control points rerun `register` and `export`. `uv run lightsuite brain run -c my_mouse.yaml --from register` does that.
+
+---
+
+## Dual-channel registration
+
+With two structural contrasts (e.g. autofluorescence and a label), register on both with mutual information:
+
+```yaml
+registration:
+  channel_primary: 1
+  channel_secondary: 2
+  dual_channel_mi_weight_primary: 0.4
+  dual_channel_mi_weight_secondary: 0.4
+```
 
 ---
 
 ## Migrating from MATLAB
 
-| MATLAB | Python |
-|--------|--------|
-| `opts` struct in demo script | YAML config file |
-| `regopts.mat` | `regopts.json` |
-| `atlas2histology_tform.mat` | `atlas2histology_tform.json` |
-| `transform_params.mat` | `transform_params.json` |
-| `matchControlPoints_unified` | `lightsuite brain match-points` (Napari) |
+| MATLAB LightSuite | PyLightSuite |
+|-------------------|--------------|
+| `opts` struct in `ls_analyze_lightsheet_volume.m` | YAML config |
 | `check_lightsuite_installation.m` | `lightsuite doctor` |
+| `preprocessLightSheetVolume.m` | `brain preprocess` |
+| `getBrainOrientation.m` | `brain check-orientation` |
+| `initializeRegistration.m` | `brain init-registration` |
+| `matchControlPoints_unified.m` | `brain match-points` |
+| `multiobjRegistration.m` | `brain register` |
+| `generateRegisteredBrainVolumes.m` | `brain export` |
+| `transformPointsToAtlas.m` | `brain import-annotations` |
+| `regopts.mat`, `atlas2histology_tform.mat`, `transform_params.mat` | the same names with `.json` |
 
-You can keep using the same TIFF layouts, atlas files, and Elastix version as the MATLAB pipeline.
+The same TIFF layouts, atlas files and Elastix version work in both. MATLAB control-point sessions can be brought over with `uv run lightsuite brain import-matlab-control-points --help`. MATLAB `.mat` checkpoints are otherwise not read: rerun the Python stages.
 
-### Intentional differences in the B-spline step
+The B-spline step matches MATLAB's metrics, optimizer, pyramid and iteration counts, with three deliberate differences:
 
-`build_bspline_params` otherwise mirrors `performMultObjBsplineRegistration.m` — same metrics,
-weights, transform, optimizer, pyramid schedule, iteration counts, spatial-sample count and
-`SampleRegionSize` formula. It deviates in three places:
+- **Bending energy:** `registration.bspline_bending_weight` adds a smoothness term MATLAB does not have. Set it to `0` to match MATLAB.
+- **Histogram bins:** written explicitly as 32 (MATLAB inherits 32 from its defaults file).
+- **Step size estimation:** `ASGDParameterEstimationMethod` is `DisplacementDistribution`; MATLAB's default `Original` takes larger steps that can fold the grid.
 
-- **Bending energy.** `registration.bspline_bending_weight` appends a
-  `TransformBendingEnergyPenalty` metric that MATLAB does not have. Set it to `0` for parity.
-- **Histogram bins.** MATLAB inherits `NumberOfFixedHistogramBins`/`NumberOfMovingHistogramBins`
-  = 32 from `matlab_elastix`'s `elastix_default.yml`, and Mattes MI prefers those over
-  `NumberOfHistogramBins`. Python writes them explicitly at 32 rather than letting Elastix fall
-  back to its own default.
-- **ASGD step estimation.** Python sets `ASGDParameterEstimationMethod` to
-  `DisplacementDistribution`; MATLAB leaves it at Elastix's built-in `Original`, whose larger
-  steps can fold the grid.
+## Limitations
+
+- No built-in cell detection: use [annotation import](annotation_import.md). Preprocess warns if `detection.enabled: true`.
+- Registered volumes are written as TIFF only.
+- With the Perens atlas, division names are filled in only where Perens ids match the Allen ontology.

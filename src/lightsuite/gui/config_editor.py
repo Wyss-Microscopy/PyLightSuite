@@ -16,8 +16,6 @@ from lightsuite.gui.config_form_data import (
     AnnotationConverterState,
     AnnotationImportRow,
     BrainFormState,
-    ChannelPaths,
-    MultiresFormState,
     SpinalFormState,
     brain_atlas_help_text,
     brain_atlas_provider_options,
@@ -28,9 +26,6 @@ from lightsuite.gui.config_form_data import (
     dump_config_dict,
     load_raw_config,
     load_template_raw,
-    merge_yaml_only_multires_fields,
-    multires_form_from_raw,
-    multires_form_to_raw,
     normalize_stats_spaces,
     parse_orientation_text,
     resolve_brain_brainglobe_form_fields,
@@ -39,10 +34,6 @@ from lightsuite.gui.config_form_data import (
     try_validate_config_dict,
 )
 from lightsuite.cli.spaces import default_export_space_checks
-
-
-_VOLUME_FILE_FILTER = "TIFF images (*.tif *.tiff);;All files (*)"
-_META_FILE_FILTER = "Metadata (*.txt *.json);;All files (*)"
 
 
 def _browse_directory(parent: Any, title: str, start: str) -> str:
@@ -57,33 +48,6 @@ def _browse_file(parent: Any, title: str, start: str, name_filter: str = "") -> 
 
     path, _ = QFileDialog.getOpenFileName(parent, title, start, name_filter)
     return path or ""
-
-
-def _browse_file_or_directory(
-    parent: Any,
-    title: str,
-    start: str,
-    *,
-    button: Any | None = None,
-    name_filter: str = "",
-) -> str:
-    """Native file or folder picker via a short menu on the Browse button."""
-    from qtpy.QtGui import QCursor
-    from qtpy.QtWidgets import QMenu
-
-    menu = QMenu(parent)
-    file_action = menu.addAction("Select file…")
-    folder_action = menu.addAction("Select folder…")
-    if button is not None:
-        pos = button.mapToGlobal(button.rect().bottomLeft())
-    else:
-        pos = QCursor.pos()
-    chosen = menu.exec(pos)
-    if chosen is file_action:
-        return _browse_file(parent, title, start, name_filter)
-    if chosen is folder_action:
-        return _browse_directory(parent, title, start)
-    return ""
 
 
 _INTENSITY_METRIC_OPTIONS: list[tuple[str, str]] = [
@@ -102,18 +66,6 @@ class _ChannelRow:
 
 
 @dataclass
-class _MultiresChannelRow:
-    row_widget: Any
-    name_edit: Any
-    overview_field: _PathField
-    roi_field: _PathField
-    overview_meta_field: _PathField
-    roi_meta_field: _PathField
-    overview_meta_label: Any
-    roi_meta_label: Any
-
-
-@dataclass
 class _AnnotationRow:
     row_widget: Any
     format_combo: Any
@@ -122,7 +74,7 @@ class _AnnotationRow:
 
 
 class _PathField:
-    """Line edit with a browse button for directories, files, or either."""
+    """Line edit with a browse button for directories or files."""
 
     def __init__(
         self,
@@ -153,14 +105,6 @@ class _PathField:
         start = self.line.text().strip() or str(Path.home())
         if self._browse_mode == "file":
             path = _browse_file(self.widget, self._browse_label, start, self._name_filter)
-        elif self._browse_mode == "file_or_directory":
-            path = _browse_file_or_directory(
-                self.widget,
-                self._browse_label,
-                start,
-                button=self._browse,
-                name_filter=self._name_filter,
-            )
         else:
             path = _browse_directory(self.widget, self._browse_label, start)
         if path:
@@ -171,12 +115,6 @@ class _PathField:
 
     def set_text(self, value: str) -> None:
         self.line.setText(value)
-
-    def set_browse_mode(self, mode: str) -> None:
-        self._browse_mode = mode
-
-    def set_browse_label(self, label: str) -> None:
-        self._browse_label = label
 
     def set_tooltip(self, text: str) -> None:
         self.widget.setToolTip(text)
@@ -238,7 +176,6 @@ class ConfigEditorDock:
         self._template_combo = QComboBox()
         self._template_combo.addItem("brain", "brain")
         self._template_combo.addItem("spinal", "spinal")
-        self._template_combo.addItem("multires", "multires")
         self._template_button = QPushButton("From template")
         self._template_button.clicked.connect(self._on_load_template)
         template_row.addWidget(self._template_combo, stretch=1)
@@ -364,28 +301,6 @@ class ConfigEditorDock:
         self._canvas_mode_combo.addItem("Union bbox", "union")
         self._canvas_mode_combo.currentIndexChanged.connect(self._mark_dirty)
         self._config_form.addRow("Registration canvas", self._canvas_mode_combo)
-        self._geometry_mode_combo = QComboBox()
-        self._geometry_mode_combo.addItem("Metadata (manifest)", "metadata")
-        self._geometry_mode_combo.addItem("Hybrid (landmarks)", "hybrid")
-        self._geometry_mode_combo.currentIndexChanged.connect(self._on_geometry_mode_changed)
-        self._config_form.addRow("Geometry mode", self._geometry_mode_combo)
-        self._landmark_fit_mode_combo = QComboBox()
-        self._landmark_fit_mode_combo.addItem("Similarity", "similarity")
-        self._landmark_fit_mode_combo.addItem("Affine", "affine")
-        self._landmark_fit_mode_combo.addItem("Rigid", "rigid")
-        self._landmark_fit_mode_combo.currentIndexChanged.connect(self._mark_dirty)
-        self._config_form.addRow("Landmark fit mode", self._landmark_fit_mode_combo)
-        self._overlap_margin_um = self._float_spin(-500.0, 500.0, self._mark_dirty)
-        self._config_form.addRow("Overlap margin µm", self._overlap_margin_um)
-        self._geometry_check_level_combo = QComboBox()
-        self._geometry_check_level_combo.addItem("Full (overlap crop + resample)", "full")
-        self._geometry_check_level_combo.addItem("Slice QC (one mid-plane)", "slice-qc")
-        self._geometry_check_level_combo.addItem("Metadata only (fast)", "metadata-only")
-        self._geometry_check_level_combo.currentIndexChanged.connect(self._mark_dirty)
-        self._config_form.addRow("Check geometry level", self._geometry_check_level_combo)
-        self._write_full_overview_canvas = QCheckBox("Write full overview canvas")
-        self._write_full_overview_canvas.stateChanged.connect(self._mark_dirty)
-        self._config_form.addRow(self._write_full_overview_canvas)
         self._import_segmentation_check = QCheckBox("Import segmentation")
         self._import_segmentation_check.stateChanged.connect(self._on_import_segmentation_toggled)
         self._config_form.addRow(self._import_segmentation_check)
@@ -473,54 +388,6 @@ class ConfigEditorDock:
         self._config_form.addRow("Stats spaces", stats_host)
         self._workers = self._int_spin(1, 64, self._mark_dirty)
         self._config_form.addRow("Workers", self._workers)
-        self._pair_label_edit = self._line_edit(self._mark_dirty)
-        self._config_form.addRow("Pair label", self._pair_label_edit)
-        self._multires_vendor_combo = QComboBox()
-        for value, label in (
-            ("mesospim", "mesoSPIM (overview/ROI TIFF or stitched folder)"),
-            ("smartspim", "SmartSPIM / ASI (stitched stack + metadata)"),
-            ("manifest", "Pre-built pair manifest JSON"),
-            ("custom", "Custom Python converter"),
-        ):
-            self._multires_vendor_combo.addItem(label, value)
-        self._multires_vendor_combo.currentIndexChanged.connect(self._on_multires_vendor_changed)
-        self._config_form.addRow("Acquisition vendor", self._multires_vendor_combo)
-        self._multires_custom_entry = _PathField(
-            parent=self._config_block,
-            browse_label="Custom pair manifest .py",
-            browse_mode="file",
-            on_change=self._mark_dirty,
-        )
-        self._config_form.addRow("Custom pair converter", self._multires_custom_entry.widget)
-        self._pair_manifest = _PathField(
-            parent=self._config_block,
-            browse_label="Pair manifest JSON",
-            browse_mode="file",
-            on_change=self._mark_dirty,
-        )
-        self._config_form.addRow("Pair manifest", self._pair_manifest.widget)
-        self._reference_channel_edit = self._line_edit(self._mark_dirty)
-        self._config_form.addRow("Reference channel", self._reference_channel_edit)
-        self._experiment_name_edit = self._line_edit(self._mark_dirty)
-        self._experiment_name_edit.setPlaceholderText("default")
-        self._config_form.addRow("Experiment name", self._experiment_name_edit)
-        self._multires_channels_host = QWidget()
-        self._multires_channels_layout = QVBoxLayout(self._multires_channels_host)
-        self._multires_channels_layout.setContentsMargins(0, 0, 0, 0)
-        multires_channel_buttons = QHBoxLayout()
-        self._add_multires_channel_button = QPushButton("Add channel")
-        self._add_multires_channel_button.clicked.connect(
-            lambda _checked=False: self._add_multires_channel_row()
-        )
-        multires_channel_buttons.addWidget(self._add_multires_channel_button)
-        multires_channel_buttons.addStretch(1)
-        multires_channel_column = QVBoxLayout()
-        multires_channel_column.addWidget(self._multires_channels_host)
-        multires_channel_column.addLayout(multires_channel_buttons)
-        multires_channel_wrapper = QWidget()
-        multires_channel_wrapper.setLayout(multires_channel_column)
-        self._multires_channels_wrapper = multires_channel_wrapper
-        self._config_form.addRow("Multires channels", multires_channel_wrapper)
 
         self._form_layout.addWidget(self._config_block)
         self._config_block.hide()
@@ -543,7 +410,6 @@ class ConfigEditorDock:
         root.addWidget(self._status_label)
 
         self._channel_rows: list[_ChannelRow] = []
-        self._multires_channel_rows: list[_MultiresChannelRow] = []
         self._import_annotation_rows: list[_AnnotationRow] = []
         self._loading_metrics = False
         self._brainglobe_catalog: list[Any] = []
@@ -644,7 +510,6 @@ class ConfigEditorDock:
         self._raw = {}
         self._dirty = False
         self._clear_channel_rows()
-        self._clear_multires_channel_rows()
         self._clear_import_annotation_rows()
         self._placeholder.show()
         self._config_block.hide()
@@ -662,15 +527,14 @@ class ConfigEditorDock:
         workflow = self._workflow
         is_brain = workflow == "brain"
         is_spinal = workflow == "spinal"
-        is_multires = workflow == "multires"
         form = self._config_form
 
-        self._set_form_row_visible(form, self._tiff_type_combo, not is_multires)
-        self._set_form_row_visible(form, self._source_path.widget, not is_multires)
-        self._set_form_row_visible(form, self._channel_list_wrapper, not is_multires)
+        self._set_form_row_visible(form, self._tiff_type_combo, True)
+        self._set_form_row_visible(form, self._source_path.widget, True)
+        self._set_form_row_visible(form, self._channel_list_wrapper, True)
         voxel_host = self._voxel_x.parentWidget()
         if voxel_host is not None:
-            self._set_form_row_visible(form, voxel_host, not is_multires)
+            self._set_form_row_visible(form, voxel_host, True)
 
         self._set_form_row_visible(form, self._atlas_source_combo, is_brain)
         self._set_form_row_visible(form, self._atlas_provider_combo, is_brain)
@@ -679,9 +543,9 @@ class ConfigEditorDock:
         self._set_form_row_visible(form, self._atlas_resolution, is_brain)
         self._set_form_row_visible(form, self._atlas_dir.widget, is_brain or is_spinal)
 
-        self._set_form_row_visible(form, self._channel_primary, not is_multires)
+        self._set_form_row_visible(form, self._channel_primary, True)
         self._set_form_row_visible(form, self._channel_secondary, is_brain)
-        self._set_form_row_visible(form, self._registration_resolution, not is_multires)
+        self._set_form_row_visible(form, self._registration_resolution, True)
 
         self._set_form_row_visible(form, self._bspline_spatial_scale, is_brain)
         self._set_form_row_visible(form, self._control_point_weight, is_brain or is_spinal)
@@ -690,12 +554,7 @@ class ConfigEditorDock:
         self._set_form_row_visible(form, self._dual_channel_mi_secondary, is_brain)
         self._set_form_row_visible(form, self._orientation_edit, is_brain)
         self._set_form_row_visible(form, self._canvas_mode_combo, is_brain)
-        self._set_form_row_visible(form, self._geometry_mode_combo, is_multires)
-        self._update_geometry_mode_field_visibility()
-        self._set_form_row_visible(form, self._overlap_margin_um, is_multires)
-        self._set_form_row_visible(form, self._geometry_check_level_combo, is_multires)
-        self._set_form_row_visible(form, self._write_full_overview_canvas, is_multires)
-        show_import_host = is_brain or is_spinal or is_multires
+        show_import_host = is_brain or is_spinal
         import_on = show_import_host and self._import_segmentation_check.isChecked()
         self._set_form_row_visible(form, self._import_segmentation_check, show_import_host)
         self._set_form_row_visible(form, self._converter_suite_combo, import_on)
@@ -711,20 +570,7 @@ class ConfigEditorDock:
 
         self._set_form_row_visible(form, self._workers, True)
 
-        self._set_form_row_visible(form, self._pair_label_edit, is_multires)
-        self._set_form_row_visible(form, self._multires_vendor_combo, is_multires)
-        self._set_form_row_visible(form, self._multires_custom_entry.widget, False)
-        self._set_form_row_visible(form, self._pair_manifest.widget, False)
-        if is_multires:
-            self._update_multires_vendor_field_visibility()
-        self._set_form_row_visible(form, self._reference_channel_edit, is_multires)
-        self._set_form_row_visible(form, self._experiment_name_edit, is_multires)
-        multires_channels_wrapper = self._multires_channels_host.parentWidget()
-        if multires_channels_wrapper is not None:
-            self._set_form_row_visible(form, multires_channels_wrapper, is_multires)
-
-        if not is_multires:
-            self._on_tiff_type_changed()
+        self._on_tiff_type_changed()
         if is_brain:
             self._update_atlas_field_state(mark_dirty=False)
         self._apply_field_tooltips()
@@ -752,34 +598,6 @@ class ConfigEditorDock:
         ]
         for field, key in shared_fields:
             self._set_field_tooltip(field, tips.get(key, ""))
-
-        if self._workflow == "multires":
-            multires_fields: list[tuple[Any, str]] = [
-                (self._pair_label_edit, "pair_label"),
-                (self._multires_vendor_combo, "multires_vendor"),
-                (self._multires_custom_entry, "multires_custom_converter"),
-                (self._pair_manifest, "pair_manifest"),
-                (self._reference_channel_edit, "reference_channel"),
-                (self._experiment_name_edit, "experiment_name"),
-                (self._multires_channels_wrapper, "multires_channels"),
-                (self._geometry_mode_combo, "geometry_mode"),
-                (self._landmark_fit_mode_combo, "landmark_fit_mode"),
-                (self._overlap_margin_um, "overlap_margin_um"),
-                (self._geometry_check_level_combo, "geometry_check_level"),
-                (self._write_full_overview_canvas, "write_full_overview_canvas"),
-                (self._import_segmentation_check, "import_segmentation"),
-                (self._converter_suite_combo, "segmentation_suite"),
-                (self._converter_source, "converter_source"),
-                (self._converter_label_edit, "converter_label"),
-                (self._converter_voxel_widget, "converter_voxel_um"),
-                (self._converter_custom_entry, "converter_custom"),
-                (self._import_annotations_wrapper, "import_annotations"),
-            ]
-            for field, key in multires_fields:
-                self._set_field_tooltip(field, tips.get(key, ""))
-            self._add_multires_channel_button.setToolTip(tips.get("multires_channels", ""))
-            self._add_import_annotation_button.setToolTip(tips.get("import_annotations", ""))
-            return
 
         sample_fields: list[tuple[Any, str]] = [
             (self._tiff_type_combo, "tiff_type"),
@@ -998,43 +816,6 @@ class ConfigEditorDock:
             self._fill_intensity_metrics(state.intensity_metrics)
             self._fill_stats_spaces(state.stats_spaces)
             self._workers.setValue(state.workers)
-        else:
-            state = multires_form_from_raw(raw)
-            self._name_edit.setText(state.sample_name)
-            self._save_path.set_text(state.save_path)
-            self._scratch_path.set_text(state.scratch)
-            self._pair_label_edit.setText(state.pair_label)
-            self._set_combo_value(self._multires_vendor_combo, state.vendor_suite or "mesospim")
-            self._multires_custom_entry.set_text(state.vendor_custom_entry)
-            self._pair_manifest.set_text(state.pair_manifest)
-            self._reference_channel_edit.setText(state.reference_channel)
-            self._experiment_name_edit.setText(state.experiment_name)
-            self._set_combo_value(self._geometry_mode_combo, state.geometry_mode)
-            self._set_combo_value(self._landmark_fit_mode_combo, state.landmark_fit_mode)
-            self._overlap_margin_um.setValue(state.overlap_margin_um)
-            self._set_combo_value(
-                self._geometry_check_level_combo,
-                state.geometry_check_level or "full",
-            )
-            self._write_full_overview_canvas.setChecked(state.write_full_overview_canvas)
-            self._fill_import_section(
-                enabled=state.import_segmentation,
-                converter=state.import_converter,
-                annotations=state.import_annotations,
-            )
-            compute = raw.get("compute") or {}
-            self._workers.setValue(int(compute.get("workers") or 4))
-            self._clear_multires_channel_rows()
-            for item in state.channels:
-                self._add_multires_channel_row(
-                    item.name,
-                    item.overview,
-                    item.roi,
-                    item.overview_meta,
-                    item.roi_meta,
-                )
-            if not state.channels:
-                self._add_multires_channel_row()
 
         self._loading = False
         self._update_workflow_layout()
@@ -1135,66 +916,12 @@ class ConfigEditorDock:
         self._update_converter_field_visibility()
         self._mark_dirty()
 
-    def _on_geometry_mode_changed(self, _index: int = 0) -> None:
-        self._update_geometry_mode_field_visibility()
-        self._mark_dirty()
-
-    def _update_geometry_mode_field_visibility(self) -> None:
-        form = self._config_form
-        is_hybrid = str(self._geometry_mode_combo.currentData() or "metadata") == "hybrid"
-        self._set_form_row_visible(
-            form,
-            self._landmark_fit_mode_combo,
-            self._workflow == "multires" and is_hybrid,
-        )
-
-    def _on_multires_vendor_changed(self, _index: int = 0) -> None:
-        suite = str(self._multires_vendor_combo.currentData() or "mesospim")
-        if suite != "mesospim" and isinstance(self._raw.get("multires"), dict):
-            multires = dict(self._raw["multires"])
-            multires.pop("mesospim_geometry", None)
-            self._raw["multires"] = multires
-        self._update_multires_vendor_field_visibility()
-        self._mark_dirty()
-
-    def _update_multires_vendor_field_visibility(self) -> None:
-        form = self._config_form
-        suite = str(self._multires_vendor_combo.currentData() or "mesospim")
-        is_manifest = suite == "manifest"
-        is_custom = suite == "custom"
-        uses_channels = suite in {"mesospim", "smartspim", "custom"}
-
-        self._set_form_row_visible(form, self._pair_manifest.widget, is_manifest)
-        self._set_form_row_visible(form, self._multires_custom_entry.widget, is_custom)
-        multires_channels_wrapper = self._multires_channels_host.parentWidget()
-        if multires_channels_wrapper is not None:
-            self._set_form_row_visible(form, multires_channels_wrapper, uses_channels)
-        self._update_multires_channel_meta_visibility()
-        self._update_multires_channel_browse_modes()
-
-    def _update_multires_channel_browse_modes(self) -> None:
-        for row in self._multires_channel_rows:
-            row.overview_field.set_browse_mode("file_or_directory")
-            row.overview_field.set_browse_label("Overview TIFF or folder")
-            row.roi_field.set_browse_mode("file_or_directory")
-            row.roi_field.set_browse_label("ROI TIFF or folder")
-
-    def _update_multires_channel_meta_visibility(self) -> None:
-        suite = str(self._multires_vendor_combo.currentData() or "mesospim")
-        show_meta = suite in {"mesospim", "smartspim", "custom"}
-        for row in self._multires_channel_rows:
-            row.overview_meta_field.widget.setVisible(show_meta)
-            row.overview_meta_label.setVisible(show_meta)
-            row.roi_meta_field.widget.setVisible(show_meta)
-            row.roi_meta_label.setVisible(show_meta)
-
     def _update_converter_field_visibility(self) -> None:
         """Show suite-dependent converter fields; native layers only for suite=native."""
         form = self._config_form
         import_on = self._import_segmentation_check.isChecked() and self._workflow in {
             "brain",
             "spinal",
-            "multires",
         }
         suite = str(self._converter_suite_combo.currentData() or "native")
         is_native = suite == "native"
@@ -1317,8 +1044,6 @@ class ConfigEditorDock:
             combo.setCurrentIndex(index)
 
     def _on_tiff_type_changed(self) -> None:
-        if self._workflow == "multires":
-            return
         tiff_type = str(self._tiff_type_combo.currentData())
         multi = tiff_type == "planeperfile"
         self._set_form_row_visible(self._config_form, self._source_path.widget, not multi)
@@ -1364,126 +1089,6 @@ class ConfigEditorDock:
             row.row_widget.setParent(None)
             row.row_widget.deleteLater()
             self._channel_rows.pop(index)
-            self._mark_dirty()
-            return
-
-    def _clear_multires_channel_rows(self) -> None:
-        self._clear_layout_widgets(self._multires_channels_layout)
-        self._multires_channel_rows.clear()
-
-    def _add_multires_channel_row(
-        self,
-        name: str = "",
-        overview: str = "",
-        roi: str = "",
-        overview_meta: str = "",
-        roi_meta: str = "",
-    ) -> None:
-        from qtpy.QtWidgets import (
-            QFormLayout,
-            QHBoxLayout,
-            QLabel,
-            QLineEdit,
-            QPushButton,
-            QVBoxLayout,
-            QWidget,
-        )
-
-        row_widget = QWidget(self._multires_channels_host)
-        column = QVBoxLayout(row_widget)
-        column.setContentsMargins(6, 6, 6, 6)
-        column.setSpacing(4)
-
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        name_edit = QLineEdit()
-        name_edit.setPlaceholderText("488")
-        name_edit.setText(name)
-        name_edit.setMaximumWidth(120)
-        name_edit.textChanged.connect(self._mark_dirty)
-        remove = QPushButton("Remove")
-        remove.clicked.connect(
-            lambda _checked=False, name=name_edit: self._remove_multires_channel_row(name)
-        )
-        header.addWidget(QLabel("Name"))
-        header.addWidget(name_edit)
-        header.addStretch(1)
-        header.addWidget(remove)
-        column.addLayout(header)
-
-        form = QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(4)
-
-        overview_field = _PathField(
-            parent=row_widget,
-            browse_label="Overview TIFF or folder",
-            browse_mode="file_or_directory",
-            on_change=self._mark_dirty,
-            name_filter=_VOLUME_FILE_FILTER,
-        )
-        overview_field.set_text(overview)
-        roi_field = _PathField(
-            parent=row_widget,
-            browse_label="ROI TIFF or folder",
-            browse_mode="file_or_directory",
-            on_change=self._mark_dirty,
-            name_filter=_VOLUME_FILE_FILTER,
-        )
-        roi_field.set_text(roi)
-        overview_meta_label = QLabel("Overview meta")
-        overview_meta_field = _PathField(
-            parent=row_widget,
-            browse_label="Overview metadata (.json/.txt)",
-            browse_mode="file",
-            on_change=self._mark_dirty,
-            name_filter=_META_FILE_FILTER,
-        )
-        overview_meta_field.set_text(overview_meta)
-        roi_meta_label = QLabel("ROI meta")
-        roi_meta_field = _PathField(
-            parent=row_widget,
-            browse_label="ROI metadata (.json/.txt)",
-            browse_mode="file",
-            on_change=self._mark_dirty,
-            name_filter=_META_FILE_FILTER,
-        )
-        roi_meta_field.set_text(roi_meta)
-        tips = tooltips_for_workflow("multires")
-        overview_field.set_tooltip(tips.get("multires_channel_overview", ""))
-        roi_field.set_tooltip(tips.get("multires_channel_roi", ""))
-        overview_meta_field.set_tooltip(tips.get("multires_channel_overview_meta", ""))
-        roi_meta_field.set_tooltip(tips.get("multires_channel_roi_meta", ""))
-
-        form.addRow("Overview", overview_field.widget)
-        form.addRow("ROI", roi_field.widget)
-        form.addRow(overview_meta_label, overview_meta_field.widget)
-        form.addRow(roi_meta_label, roi_meta_field.widget)
-        column.addLayout(form)
-
-        self._multires_channels_layout.addWidget(row_widget)
-        self._multires_channel_rows.append(
-            _MultiresChannelRow(
-                row_widget=row_widget,
-                name_edit=name_edit,
-                overview_field=overview_field,
-                roi_field=roi_field,
-                overview_meta_field=overview_meta_field,
-                roi_meta_field=roi_meta_field,
-                overview_meta_label=overview_meta_label,
-                roi_meta_label=roi_meta_label,
-            )
-        )
-        self._update_multires_channel_meta_visibility()
-        self._update_multires_channel_browse_modes()
-
-    def _remove_multires_channel_row(self, name_edit: Any) -> None:
-        for index, row in enumerate(self._multires_channel_rows):
-            if row.name_edit is not name_edit:
-                continue
-            row.row_widget.setParent(None)
-            row.row_widget.deleteLater()
-            self._multires_channel_rows.pop(index)
             self._mark_dirty()
             return
 
@@ -1561,43 +1166,8 @@ class ConfigEditorDock:
                 workers=self._workers.value(),
             )
             return spinal_form_to_raw(state, self._raw)
-        channels = [
-            ChannelPaths(
-                name=row.name_edit.text().strip(),
-                overview=row.overview_field.text(),
-                roi=row.roi_field.text(),
-                overview_meta=row.overview_meta_field.text(),
-                roi_meta=row.roi_meta_field.text(),
-            )
-            for row in self._multires_channel_rows
-        ]
-        state = MultiresFormState(
-            sample_name=self._name_edit.text().strip(),
-            save_path=self._save_path.text(),
-            scratch=self._scratch_path.text(),
-            pair_label=self._pair_label_edit.text().strip(),
-            vendor_suite=str(self._multires_vendor_combo.currentData() or "mesospim"),
-            vendor_custom_entry=self._multires_custom_entry.text(),
-            pair_manifest=self._pair_manifest.text(),
-            reference_channel=self._reference_channel_edit.text().strip(),
-            experiment_name=self._experiment_name_edit.text().strip() or "default",
-            channels=channels,
-            geometry_mode=str(self._geometry_mode_combo.currentData() or "metadata"),
-            landmark_fit_mode=str(self._landmark_fit_mode_combo.currentData() or "similarity"),
-            overlap_margin_um=self._overlap_margin_um.value(),
-            geometry_check_level=str(
-                self._geometry_check_level_combo.currentData() or "full"
-            ),
-            write_full_overview_canvas=self._write_full_overview_canvas.isChecked(),
-            import_segmentation=self._import_segmentation_check.isChecked(),
-            import_converter=self._collect_import_converter(),
-            import_annotations=self._collect_import_annotations(),
-        )
-        raw = multires_form_to_raw(state, self._raw)
-        compute = dict(raw.get("compute") or {})
-        compute["workers"] = self._workers.value()
-        raw["compute"] = compute
-        return raw
+        msg = f"Unsupported workflow: {self._workflow!r}"
+        raise ValueError(msg)
 
     def _update_path_label(self) -> None:
         if self._config_path is None:
@@ -1681,7 +1251,6 @@ class ConfigEditorDock:
         if self._workflow is None:
             self._on_log("No config loaded in the editor.")
             return
-        self._merge_yaml_only_fields_from_disk(path)
         raw = self._collect_raw()
         text = dump_config_dict(raw)
         try:
@@ -1706,19 +1275,3 @@ class ConfigEditorDock:
         workflow, config = validation
         self._status_label.setText(f"Saved and validated ({workflow}, {config.sample.name}).")
         self._on_saved(self._config_path)
-
-    def _merge_yaml_only_fields_from_disk(self, path: Path) -> None:
-        """Pull inspect-geometry YAML (lateral_flip) into the editor before Save."""
-        if self._workflow != "multires":
-            return
-        source = path if path.is_file() else self._config_path
-        if source is None:
-            return
-        source = Path(source)
-        if not source.is_file():
-            return
-        try:
-            _workflow, disk = load_raw_config(source)
-        except LightsuiteConfigError:
-            return
-        self._raw = merge_yaml_only_multires_fields(self._raw, disk)
