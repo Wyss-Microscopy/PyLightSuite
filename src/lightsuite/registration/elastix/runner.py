@@ -57,7 +57,6 @@ def run_bspline_registration(
     use_multistep: bool,
     dual_weight_autofluor: float,
     dual_weight_signal: float,
-    bending_energy_weight: float = 0.0,
 ) -> BsplineRegistrationResult:
     """Run single- or dual-channel elastix B-spline registration."""
     output_dir = output_dir.expanduser()
@@ -80,7 +79,6 @@ def run_bspline_registration(
         use_multistep=use_multistep,
         dual_weight_autofluor=dual_weight_autofluor,
         dual_weight_signal=dual_weight_signal,
-        bending_energy_weight=bending_energy_weight,
     )
     param_path = output_dir / "bspline_parameters.txt"
     write_parameter_file(param_path, params)

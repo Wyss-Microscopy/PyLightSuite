@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
 from enum import Enum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -163,18 +164,31 @@ class AtlasConfig(BaseModel):
 
 
 class RegistrationConfig(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def drop_bending_weight(cls, data: Any) -> Any:
+        """Older configs had bspline_bending_weight; registration now always uses 0 (MATLAB)."""
+        if isinstance(data, dict) and "bspline_bending_weight" in data:
+            data = dict(data)
+            value = data.pop("bspline_bending_weight")
+            try:
+                nonzero = float(value) != 0.0
+            except (TypeError, ValueError):
+                nonzero = True
+            if nonzero:
+                warnings.warn(
+                    f"registration.bspline_bending_weight={value!r} is ignored: B-spline "
+                    "registration has no bending-energy penalty (as in MATLAB LightSuite). "
+                    "Remove the key from the config.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        return data
+
     resolution_um: float = Field(default=20.0, gt=0)
     channel_primary: int = Field(default=1, ge=1)
     channel_secondary: int | None = Field(default=None, ge=1)
     bspline_spatial_scale_mm: float = Field(default=0.64, gt=0)
-    bspline_bending_weight: float = Field(
-        default=2.0,
-        ge=0,
-        description=(
-            "Weight of the elastix TransformBendingEnergyPenalty smoothness term "
-            "(0 disables it for MATLAB parity). Raise it if annotation contours look wavy."
-        ),
-    )
     control_point_weight: float = Field(default=0.2, ge=0, le=1)
     augment_points: bool = False
     dual_channel_mi_weight_primary: float = Field(

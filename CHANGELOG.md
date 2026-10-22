@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   information, landmarks, bending energy) over all levels, which inverted less accurately
   and could diverge. The "gentle" fallback schedule is gone; a failed inversion is
   retried once.
+- B-spline registration has no bending-energy penalty and uses 48 histogram bins, as in
+  MATLAB `performMultObjBsplineRegistration.m` (Python used a penalty of weight 2.0 and 32
+  bins). `registration.bspline_bending_weight` is no longer a setting: older configs still
+  load, and a non-zero value warns that it is ignored.
 
 ### Fixed
 

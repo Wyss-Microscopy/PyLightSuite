@@ -7,6 +7,9 @@ from typing import Any
 
 import numpy as np
 
+# performMultObjBsplineRegistration.m default (getOr(optsreg, 'n_histogram_bins', 48)).
+BSPLINE_HISTOGRAM_BINS = 48
+
 
 def build_bspline_params(
     *,
@@ -19,25 +22,15 @@ def build_bspline_params(
     use_multistep: bool = True,
     dual_weight_autofluor: float = 1.0,
     dual_weight_signal: float = 0.5,
-    bending_energy_weight: float = 0.0,
 ) -> dict[str, Any]:
     """Build elastix parameter dict for multi-metric B-spline registration.
 
     Mirrors ``performMultObjBsplineRegistration.m``: the no-manual-landmark (auto-only)
     case uses the same multi-resolution schedule and image-dominant metric weights as the
     manual case. The caller simply halves the control-point weight for auto-only runs
-    (MATLAB "revert to automated mode").
-
-    ``bending_energy_weight`` adds a ``TransformBendingEnergyPenalty`` term that MATLAB
-    does not have. Mattes MI is evaluated on ~5000 random samples drawn from a single
-    small ``SampleRegionSize`` cube per iteration, so on a wide acquisition canvas most
-    control points receive only a handful of informative updates and the rest of their
-    trajectory is a random walk. Without a smoothness prior that produces high-amplitude,
-    spatially incoherent warping (visible as wavy annotation contours) even though the
-    transform stays almost everywhere invertible.
+    (MATLAB "revert to automated mode"). Like MATLAB, there is no bending-energy penalty.
     """
     cpwt = control_point_weight
-    bending = float(bending_energy_weight)
     ny, nx, nz = fixed_shape
     fixed_size_mm = np.array([ny, nx, nz], dtype=float) * spacing_mm
     max_sample_region = float(min(fixed_size_mm) / 3.0)
@@ -59,9 +52,8 @@ def build_bspline_params(
         "NumberOfResolutions": 4,
         "NumberOfHistogramBins": n_histogram_bins,
         # AdvancedMattesMutualInformation prefers the per-image bin counts over
-        # NumberOfHistogramBins. matlab_elastix elastix_default.yml sets both to 32, so
-        # MATLAB effectively runs 32 bins; writing them here keeps Python from silently
-        # falling back to elastix's own default and using a noisier joint histogram.
+        # NumberOfHistogramBins; set all three so elastix never falls back to its own
+        # default.
         "NumberOfFixedHistogramBins": n_histogram_bins,
         "NumberOfMovingHistogramBins": n_histogram_bins,
         "SP_A": 20,
@@ -109,16 +101,12 @@ def build_bspline_params(
         ]
         weights = [1.0, cpwt]
 
-    if bending > 0:
-        metrics.append("TransformBendingEnergyPenalty")
-        weights.append(bending)
-
     n_metrics = len(metrics)
     params["Metric"] = metrics
     for index, weight in enumerate(weights):
         params[f"Metric{index}Weight"] = weight
-    # Elastix 5.1 requires 1 or NumberOfMetrics entries for these. Single-channel keeps
-    # the scalar form when there is no penalty term so parameter files stay MATLAB-shaped.
+    # Elastix requires 1 or NumberOfMetrics entries for these. Single-channel keeps the
+    # scalar form so parameter files stay MATLAB-shaped.
     if n_metrics == 2:
         params["FixedImagePyramid"] = "FixedRecursiveImagePyramid"
         params["MovingImagePyramid"] = "MovingRecursiveImagePyramid"
