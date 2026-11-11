@@ -54,6 +54,45 @@ def main_callback(
     """LightSuite CLI."""
 
 
+def _refresh_results_info(workflow: str, cfg: object, stage: str, config: str | Path) -> None:
+    """Rewrite ``<save_path>/info_results.md`` after a stage command (never raises)."""
+    from lightsuite.export.results_info import refresh_results_info
+
+    refresh_results_info(cfg, workflow, stage=stage, config_path=config)
+
+
+def _write_results_info_command(workflow: str, cfg: object, config: str) -> None:
+    from lightsuite.export.results_info import RESULTS_INFO_FILENAME, write_results_info
+
+    path = write_results_info(cfg, workflow, config_path=config)
+    if path is None:
+        typer.secho(
+            f"save_path does not exist yet: {cfg.sample.save_path}", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=1)
+    typer.echo(f"Wrote {RESULTS_INFO_FILENAME}: {path}")
+
+
+@brain_app.command("info")
+def brain_info(
+    config: str = typer.Option(..., "--config", "-c", help="Pipeline YAML config."),
+) -> None:
+    """Write info_results.md: a guide to the files in save_path (also written after each stage)."""
+    from lightsuite.config.loader import load_config
+
+    _write_results_info_command("brain", load_config(config), config)
+
+
+@spinal_app.command("info")
+def spinal_info(
+    config: str = typer.Option(..., "--config", "-c", help="Spinal cord pipeline YAML config."),
+) -> None:
+    """Write info_results.md: a guide to the files in save_path (also written after each stage)."""
+    from lightsuite.config.loader import load_spinal_config
+
+    _write_results_info_command("spinal", load_spinal_config(config), config)
+
+
 @app.command("doctor")
 def doctor(
     config: str | None = typer.Option(
@@ -156,6 +195,7 @@ def brain_check_orientation(
     config_path = Path(config).expanduser().resolve()
     cfg = load_config(config_path)
     path = run_brain_orientation_check(cfg, config_path, headless=headless)
+    _refresh_results_info("brain", cfg, "check-orientation", config_path)
     typer.echo(f"Brain orientation saved to {path}")
 
 
@@ -174,6 +214,7 @@ def brain_import_annotations(
 
     cfg = load_config(config)
     results = run_brain_import_annotations(cfg, write_csv=write_csv)
+    _refresh_results_info("brain", cfg, "import-annotations", config)
     for item in results:
         typer.echo(f"{item.label}: {item.kind} — {item.n_atlas} atlas features")
 
@@ -188,6 +229,7 @@ def brain_convert_annotations_cmd(
 
     cfg = load_config(config)
     result = run_convert_annotations_for_pipeline(cfg)
+    _refresh_results_info("brain", cfg, "convert-annotations", config)
     typer.echo(
         f"suite={result.suite} converted={result.n_converted} "
         f"layers={len(result.annotations)} → {result.summary_path}"
@@ -560,6 +602,7 @@ def brain_export(
         save_registered_volume=save_volume,
         spaces=parse_spaces_option(space),
     )
+    _refresh_results_info("brain", cfg, "export", config)
     if result.registered_volumes:
         typer.echo(f"Registered volumes: {len(result.registered_volumes)} channel(s)")
     if result.parcellation_paths:
@@ -581,6 +624,7 @@ def brain_register(
 
     cfg = load_config(config)
     run_brain_registration(cfg, use_multistep=not single_step)
+    _refresh_results_info("brain", cfg, "register", config)
 
 
 @brain_app.command("align-slices")
@@ -598,6 +642,7 @@ def brain_align_slices(
 
     cfg = load_config(config)
     path = run_brain_align_slices(cfg, headless=headless)
+    _refresh_results_info("brain", cfg, "align-slices", config)
     typer.echo(f"Slice correspondence: {path}")
 
 
@@ -616,6 +661,7 @@ def brain_match_points(
 
     cfg = load_config(config)
     path = run_brain_match_points(cfg, headless=headless)
+    _refresh_results_info("brain", cfg, "match-points", config)
     typer.echo(f"Control points session: {path}")
 
 
@@ -629,6 +675,7 @@ def brain_init_registration(
 
     cfg = load_config(config)
     initialize_brain_registration(cfg)
+    _refresh_results_info("brain", cfg, "init-registration", config)
 
 
 @brain_app.command("preprocess")
@@ -646,6 +693,7 @@ def brain_preprocess(
 
     cfg = load_config(config)
     result = preprocess_lightsheet_volume(cfg, force=force)
+    _refresh_results_info("brain", cfg, "preprocess", config)
     typer.echo(f"Primary registration volume: {result.checkpoint.regvolpath}")
 
 
@@ -678,6 +726,7 @@ def spinal_check_orientation(
 
     cfg = load_spinal_config(config)
     path = run_spinal_orientation(cfg, headless=headless)
+    _refresh_results_info("spinal", cfg, "check-orientation", config)
     typer.echo(f"Cord orientation saved to {path}")
 
 
@@ -696,6 +745,7 @@ def spinal_preprocess(
 
     cfg = load_spinal_config(config)
     result = preprocess_spinal_cord_sample(cfg, headless=headless)
+    _refresh_results_info("spinal", cfg, "preprocess", config)
     typer.echo(f"Wrote checkpoint: {result.checkpoint.lsfolder}/regopts.json")
 
 
@@ -714,6 +764,7 @@ def spinal_straighten(
 
     cfg = load_spinal_config(config)
     path = run_spinal_straighten(cfg, headless=headless)
+    _refresh_results_info("spinal", cfg, "straighten", config)
     typer.echo(f"Alignment checkpoint: {path}")
 
 
@@ -732,6 +783,7 @@ def spinal_align_longitudinal(
 
     cfg = load_spinal_config(config)
     path = run_spinal_align_longitudinal(cfg, headless=headless)
+    _refresh_results_info("spinal", cfg, "align-longitudinal", config)
     typer.echo(f"Longitudinal correspondence: {path}")
 
 
@@ -745,6 +797,7 @@ def spinal_init_registration(
 
     cfg = load_spinal_config(config)
     initialize_cord_registration(cfg)
+    _refresh_results_info("spinal", cfg, "init-registration", config)
 
 
 @spinal_app.command("match-points")
@@ -762,6 +815,7 @@ def spinal_match_points(
 
     cfg = load_spinal_config(config)
     path = run_spinal_match_points(cfg, headless=headless)
+    _refresh_results_info("spinal", cfg, "match-points", config)
     typer.echo(f"Control points session: {path}")
 
 
@@ -775,6 +829,7 @@ def spinal_register(
 
     cfg = load_spinal_config(config)
     path = run_spinal_registration(cfg)
+    _refresh_results_info("spinal", cfg, "register", config)
     typer.echo(f"Transform params: {path}")
 
 
@@ -794,6 +849,7 @@ def spinal_export(
 
     cfg = load_spinal_config(config)
     result = export_registered_cord_volumes(cfg, spaces=parse_spaces_option(space))
+    _refresh_results_info("spinal", cfg, "export", config)
     typer.echo(f"Registered volumes in {result.output_dir} ({len(result.channel_paths)} channels)")
     if result.region_stats is not None and result.region_stats.combined_path is not None:
         typer.echo(
@@ -817,6 +873,7 @@ def spinal_import_annotations(
 
     cfg = load_spinal_config(config)
     results = run_cord_import_annotations(cfg, write_csv=write_csv)
+    _refresh_results_info("spinal", cfg, "import-annotations", config)
     for item in results:
         typer.echo(f"{item.label}: {item.kind} — {item.n_atlas} atlas features")
 
@@ -924,6 +981,7 @@ def spinal_region_stats(
         parcellate_intensities=parcellate_intensities,
         stats_spaces=parse_spaces_option(space),
     )
+    _refresh_results_info("spinal", cfg, "region-stats", config)
     if result.combined_path is not None:
         typer.echo(
             f"Region stats: {result.combined_path} ({result.n_rows} rows, "
@@ -1112,6 +1170,7 @@ def spinal_plot_heatmap(
         log_scale=log_scale,
         normalize=normalize,
     )
+    _refresh_results_info("spinal", cfg, "plot-heatmap", config)
     typer.echo(f"Heatmap saved: {path}")
 
 

@@ -263,6 +263,7 @@ Shows the registered channels, the warped atlas template and labels, and importe
 
 ```
 <save_path>/
+├── info_results.md                       # guide to the files below (rewritten after every stage)
 ├── cord_orientation.txt                  # check-orientation
 ├── regopts.json                          # preprocess, init-registration
 ├── sample_reference.json                 # native grid for annotation import
@@ -277,6 +278,8 @@ Shows the registered channels, the warped atlas template and labels, and importe
 ├── stats/                                # region statistics
 └── plots/                                # plot-heatmap figures
 ```
+
+`info_results.md` lists the files that actually exist in `save_path`, says what each one is and which stage wrote it, and explains the columns and metrics of `stats/region_stats.csv`. It is rewritten after every stage; `uv run lightsuite spinal info -c my_spinal.yaml` rebuilds it on demand. Every possible output is described in [output files](outputs.md).
 
 ---
 

@@ -28,7 +28,7 @@ PyLightSuite is a command-line pipeline with optional **Napari** GUIs for manual
 | **External annotations** | `lightsuite brain import-annotations` | Import spot lists (`points.csv`) or masks (TIFF) after registration and map them to atlas regions. |
 
 **Inputs:** multi-page TIFF stacks (channel-per-file or plane-per-file layouts).
-**Outputs:** atlas-space registered volumes (multi-page TIFF), parcellation intensity CSVs, optional annotation transforms.
+**Outputs:** atlas-space registered volumes (multi-page TIFF), parcellation intensity CSVs, optional annotation transforms. Every run also writes `info_results.md` in the results folder, a guide to the files it produced ([output files](docs/outputs.md)).
 
 Interactive stages (orientation, match-points, registration review) are available through `lightsuite gui -c config.yaml` or the per-stage Napari tools.
 
@@ -103,6 +103,7 @@ See [Brain lightsheet → Migrating from MATLAB](docs/usage_lightsheet_brain.md#
 | [Spinal cord](docs/usage_spinal_cord.md) | Straightening, registration, region statistics |
 | [Annotation import](docs/annotation_import.md) | Bringing external spots and masks into atlas space |
 | [Registration spaces](docs/registration_spaces.md) | Atlas-space vs sample-space outputs |
+| [Output files](docs/outputs.md) | Every output file, and the `info_results.md` guide |
 | [Configuration reference](docs/config_reference.md) | Every YAML key, with GUI/YAML availability |
 
 The `docs/` folder is also an [MkDocs](https://www.mkdocs.org/) site: `uv run --with-requirements docs/requirements.txt mkdocs serve`.

@@ -33,7 +33,7 @@ uv run lightsuite gui -c my_sample.yaml              # run stages from one Napar
 | **Input** | Stitched TIFF: one multi-page TIFF per channel (`channelperfile`, eg. mesoSPIM) or one TIFF per Z plane (`planeperfile`, e.g. Terastitcher output, SmartSPIM) |
 | **Brain atlases** | Allen CCF v3 (10 µm), Perens LSFM (20 µm), BrainGlobe atlases (`atlas` extra) |
 | **Spinal atlas** | Fiederling et al. 2021 |
-| **Output** | Multi-page TIFF volumes, CSV/JSON region tables, NPZ/CSV coordinates |
+| **Output** | Multi-page TIFF volumes, CSV/JSON region tables, NPZ/CSV coordinates, and an `info_results.md` guide to the files produced ([output files](outputs.md)) |
 
 CZI and Imaris `.ims` volumes are not read directly, export them to TIFF first.
 
@@ -48,7 +48,8 @@ Built-in cell detection, the widefield coronal slice module, probe tracing, the 
 3. **[Spinal cord](usage_spinal_cord.md)**: spinal config, every stage, region statistics
 4. **[Annotation import](annotation_import.md)**: external cells and masks into atlas space
 5. **[Registration spaces](registration_spaces.md)**: atlas space vs sample space outputs
-6. **[Configuration reference](config_reference.md)**: every YAML key and its default
+6. **[Output files](outputs.md)**: every file each workflow writes, and the `info_results.md` guide
+7. **[Configuration reference](config_reference.md)**: every YAML key and its default
 
 ## Getting help
 

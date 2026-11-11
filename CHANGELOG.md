@@ -5,6 +5,21 @@ All notable changes to PyLightSuite (the `lightsuite` Python package) are docume
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`info_results.md`**: after every stage, brain and spinal workflows write a guide to the
+  files in `save_path`: what each file is, which stage wrote it, the metrics and channels in
+  the statistics tables, and what their columns mean. Rebuild it with
+  `lightsuite brain info` / `lightsuite spinal info`.
+- **Docs**: new [output files](docs/outputs.md) page, generated from the same list of outputs.
+
+### Fixed
+
+- Docs: brain QC previews are written directly in `qc/`, not in `qc/initial/`, `qc/affine/`
+  and `qc/bspline/`.
+
 ## [0.1.0] - 2026-10-19
 
 Initial public release: a Python port of the registration core of the

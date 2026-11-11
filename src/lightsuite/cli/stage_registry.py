@@ -293,7 +293,11 @@ def run_stage(workflow: str, stage_id: str, config: Any, ctx: StageContext) -> A
         known = ", ".join(sorted(spec.runners))
         msg = f"Unsupported {workflow} stage: {stage_id!r}; choose from: {known}"
         raise ValueError(msg) from exc
-    return runner(config, ctx)
+    result = runner(config, ctx)
+    from lightsuite.export.results_info import refresh_results_info
+
+    refresh_results_info(config, workflow, stage=stage_id, config_path=ctx.config_path)
+    return result
 
 
 def validate_registry() -> None:

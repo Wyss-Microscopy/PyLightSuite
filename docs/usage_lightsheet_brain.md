@@ -16,10 +16,10 @@ Before you start, finish the [installation](installation.md): PyLightSuite with 
 |:-:|-------|------|--------|
 | 1 | `preprocess` | Automatic | `chan_N_sample_register_20um.tif`, `regopts.json`, `sample_reference.json` |
 | 2 | `check-orientation` | GUI | `brain_orientation.txt` |
-| 3 | `init-registration` | Automatic | `regopts.json` (coarse transform), `qc/initial/` previews |
+| 3 | `init-registration` | Automatic | `regopts.json` (coarse transform), `qc/dim*_initial_registration.png` previews |
 | 4 | `align-slices` | GUI, optional | `slice_correspondence.json` |
 | 5 | `match-points` | GUI, optional | `atlas2histology_tform.json` |
-| 6 | `register` | Automatic | `transform_params.json`, B-spline files, `qc/affine/` and `qc/bspline/` previews |
+| 6 | `register` | Automatic | `transform_params.json`, B-spline files, `qc/*_affine_registration.png` and `qc/*_bspline_registration.png` previews |
 | 7 | `export` | Automatic | `volume_registered/`, `stats/` region tables |
 | 8 | `import-annotations` | Automatic, optional | `imports/` atlas coordinates for external cells and masks |
 | 9 | `view-registration` | GUI, optional | (review only) |
@@ -219,7 +219,7 @@ Outputs:
 
 - `transform_params.json`: the complete transform,
 - `bspline_samp_to_atlas_20um.txt` and `bspline_atlas_to_samp_20um.txt`: B-spline parameter files for both directions,
-- `qc/affine/{name}_dim{1,2,3}_affine_registration.png` and `qc/bspline/{name}_dim{1,2,3}_bspline_registration.png`: preview slices with atlas outlines after each step.
+- `qc/{name}_dim{1,2,3}_affine_registration.png` and `qc/{name}_dim{1,2,3}_bspline_registration.png`: preview slices with atlas outlines after each step.
 
 Compare the affine and B-spline previews: the B-spline outlines should follow the tissue more closely without becoming wavy. Warnings about large landmark residuals or poor overlap are printed in the log. Elastix works in `_work/`, which is deleted when the stage succeeds.
 
@@ -297,6 +297,7 @@ Sample space needs `export --space sample` (or `both`) first for the warped atla
 
 ```
 <save_path>/
+├── info_results.md                   # guide to the files below (rewritten after every stage)
 ├── regopts.json                      # preprocess + init-registration state
 ├── sample_reference.json             # native grid for annotation import
 ├── chan_1_sample_register_20um.tif   # one per channel (preprocess)
@@ -306,10 +307,10 @@ Sample space needs `export --space sample` (or `both`) first for the warped atla
 ├── transform_params.json             # register
 ├── bspline_samp_to_atlas_20um.txt
 ├── bspline_atlas_to_samp_20um.txt
-├── qc/
-│   ├── initial/dim{1,2,3}_initial_registration.png
-│   ├── affine/{name}_dim{1,2,3}_affine_registration.png
-│   └── bspline/{name}_dim{1,2,3}_bspline_registration.png
+├── qc/                               # previews and diagnostics JSON
+│   ├── dim{1,2,3}_initial_registration.png
+│   ├── {name}_dim{1,2,3}_affine_registration.png
+│   └── {name}_dim{1,2,3}_bspline_registration.png
 ├── stats/                            # export: region_stats.csv, region_stats_top10.csv, chanNN_*.csv
 ├── imports/                          # import-annotations: *_atlas_coords.npz, *_sample_coords.npz
 ├── volume_registered/
@@ -317,6 +318,8 @@ Sample space needs `export --space sample` (or `both`) first for the warped atla
 │   └── sample_space/                 # export --space sample|both
 └── _work/                            # temporary Elastix folders, removed on success
 ```
+
+`info_results.md` lists the files that actually exist in `save_path`, says what each one is and which stage wrote it, and explains the columns and metrics of `stats/region_stats.csv`. It is rewritten after every stage; `uv run lightsuite brain info -c my_mouse.yaml` rebuilds it on demand. Every possible output is described in [output files](outputs.md).
 
 ## Rerunning stages
 
