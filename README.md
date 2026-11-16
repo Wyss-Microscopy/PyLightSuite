@@ -54,6 +54,12 @@ Example configs are indexed in [`examples/README.md`](examples/README.md) (brain
 
 ---
 
+## Visualizing results in Neuroglancer
+
+Registration results can be viewed in [Neuroglancer](https://github.com/google/neuroglancer) using [lightsuite-neuroglancer](https://github.com/Wyss-Microscopy/lightsuite-neuroglancer). See that repository for installation and usage instructions.
+
+---
+
 ## Hardware requirements
 
 The Python pipeline is bound by **CPU, RAM, and fast local disk**. **The GPU is not used** (`compute.use_gpu` is reserved and ignored). Built-in cell detection is not implemented in Python.
