@@ -93,9 +93,8 @@ def run_bspline_registration(
     fixed_paths: list[Path] = []
     moving_paths: list[Path] = []
     if dual:
-        # One image pair per metric: AF+atlas, signal+atlas, then AF+atlas duplicates for
-        # the landmark and (optional) bending-energy slots, which need valid inputs but
-        # do not read the intensities.
+        # One image pair per metric: AF+atlas, signal+atlas, then an AF+atlas duplicate for
+        # the landmark slot, which needs valid inputs but does not read the intensities.
         stem = output_dir.name
         n_metrics = len(params["Metric"])
         fixed_for_metric = [fixed_u16, fixed_secondary_u16] + [fixed_u16] * (n_metrics - 2)

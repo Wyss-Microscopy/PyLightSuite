@@ -3,26 +3,54 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import shutil
 from pathlib import Path
 
+import numpy as np
+
 from lightsuite.registration.elastix import backend
-from lightsuite.registration.elastix.mhd import read_mhd_spacing
+from lightsuite.registration.elastix.mhd import read_mhd_spacing, read_mhd_volume
+from lightsuite.registration.elastix.runner import run_transformix_physical_points
 
 INVERSION_PARAMETER_FILE = "inversion_parameters.txt"
 # invertElastixTransformCP iterfac: iterations = forward final level x this factor.
+# 1.5 is the matlab_elastix default (cord, slices); multiobjRegistration.m passes 2 for brains.
 INVERSION_ITERATION_FACTOR = 1.5
+BRAIN_INVERSION_ITERATION_FACTOR = 2.0
+# Gain-schedule offset A of the optimizer step size a / (k + 1 + A)^alpha. The inversion
+# keeps the forward run's SP_A (20), as matlab_elastix does; if that inverse fails the
+# round-trip check, it is rerun with SP_A 1.
+INVERSION_FALLBACK_SP_A = 1
+# Round-trip check: tissue points x of the fixed image go through the forward transform and
+# then the inverse. A converged inverse brings them back within a few µm (median 2-7 µm on
+# three test brains); a median above this limit (in mm, the physical unit of LightSuite
+# elastix runs) means the inversion did not converge.
+ROUNDTRIP_MEDIAN_LIMIT_MM = 0.025
+ROUNDTRIP_POINTS = 3000
+ROUNDTRIP_MARGIN_VOXELS = 25
+INVERSION_REPORT_FILE = "inversion_report.json"
+logger = logging.getLogger(__name__)
 # Components elastix creates once per metric; the inversion has a single metric.
 _PER_METRIC_KEYS = ("FixedImagePyramid", "MovingImagePyramid", "ImageSampler", "Interpolator")
 
 
-def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None) -> Path:
+def invert_elastix_transform(
+    transform_dir: Path,
+    output_dir: Path | None = None,
+    *,
+    iteration_factor: float = INVERSION_ITERATION_FACTOR,
+) -> Path:
     """Invert a forward elastix B-spline transform; return the inverse TransformParameters.
 
     Follows matlab_elastix ``invertElastixTransformCP`` (2026-09): register the forward
     fixed image to itself, starting from the forward transform, with
     ``DisplacementMagnitudePenalty`` (which drives T(x) towards x) at the finest pyramid
-    level only. No image metric and no landmarks are used.
+    level only. No image metric and no landmarks are used. The optimizer keeps the forward
+    ``SP_A``; if the inverse fails a round-trip check (forward then inverse should return
+    tissue points to where they started), it is rerun with ``SP_A`` 1 and the better of the
+    two is kept. ``inversion_report.json`` in *output_dir* records which was used.
     """
     transform_dir = transform_dir.expanduser()
     if output_dir is None:
@@ -30,6 +58,9 @@ def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None
     output_dir = output_dir.expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     _clear_inversion_workspace(output_dir)
+    # Left over from an earlier run: the fallback attempt and its report.
+    shutil.rmtree(output_dir / f"sp_a_{INVERSION_FALLBACK_SP_A}", ignore_errors=True)
+    (output_dir / INVERSION_REPORT_FILE).unlink(missing_ok=True)
 
     fixed_mhd, param_paths = _forward_run_inputs(transform_dir)
     coef_files = sorted(transform_dir.glob("TransformParameters.*.txt"), reverse=True)
@@ -37,12 +68,65 @@ def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None
         msg = f"No TransformParameters.*.txt in {transform_dir}"
         raise FileNotFoundError(msg)
 
-    param_path = output_dir / INVERSION_PARAMETER_FILE
-    param_path.write_text(
-        build_inversion_parameters(param_paths[0].read_text(encoding="utf-8", errors="replace")),
-        encoding="utf-8",
-    )
+    forward_text = param_paths[0].read_text(encoding="utf-8", errors="replace")
+    try:
+        probe = _roundtrip_probe(fixed_mhd, coef_files[0], output_dir / "roundtrip_forward")
+    except (OSError, ValueError, backend.ElastixError) as exc:
+        logger.warning("B-spline inversion: skipping the round-trip check (%s).", exc)
+        probe = None
 
+    # The forward SP_A (20) gives the most accurate inverse, but a run can still diverge
+    # (e.g. load-dependent summation order). A diverged inverse maps the probe points back
+    # far from where they started, so check the round trip and, if it is off, rerun with
+    # SP_A 1 (a different step-size schedule) and keep the better inverse.
+    candidates: list[tuple[float, Path, int | None]] = []
+    for sp_a in (None, INVERSION_FALLBACK_SP_A):
+        attempt_dir = output_dir if sp_a is None else output_dir / f"sp_a_{sp_a}"
+        inverted = _invert_with_retry(
+            fixed_mhd=fixed_mhd,
+            output_dir=attempt_dir,
+            coef_path=coef_files[0],
+            parameter_text=build_inversion_parameters(
+                forward_text, iteration_factor=iteration_factor, sp_a=sp_a
+            ),
+        )
+        if inverted is None:
+            continue
+        error_mm = _roundtrip_median_mm(probe, inverted, attempt_dir / "roundtrip_inverse")
+        candidates.append((error_mm, inverted, sp_a))
+        if error_mm <= ROUNDTRIP_MEDIAN_LIMIT_MM:
+            break
+        logger.warning(
+            "B-spline inversion (SP_A %s): median round-trip error %.1f µm exceeds %.0f µm.",
+            "forward" if sp_a is None else sp_a,
+            error_mm * 1000.0,
+            ROUNDTRIP_MEDIAN_LIMIT_MM * 1000.0,
+        )
+    if not candidates:
+        msg = f"elastix inversion failed in {output_dir}. See elastix.log in that directory."
+        raise RuntimeError(msg)
+
+    error_mm, inverted, sp_a = min(candidates, key=lambda c: c[0])
+    report = {
+        "sp_a": "forward" if sp_a is None else sp_a,
+        "iteration_factor": iteration_factor,
+        "roundtrip_median_um": None if probe is None else round(error_mm * 1000.0, 2),
+        "attempts": [
+            {"sp_a": "forward" if s is None else s, "roundtrip_median_um": round(e * 1000.0, 2)}
+            for e, _, s in candidates
+        ],
+    }
+    (output_dir / INVERSION_REPORT_FILE).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return inverted
+
+
+def _invert_with_retry(
+    *, fixed_mhd: Path, output_dir: Path, coef_path: Path, parameter_text: str
+) -> Path | None:
+    """Run the inversion; repeat once if elastix fails. Returns the pure inverse or None."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    param_path = output_dir / INVERSION_PARAMETER_FILE
+    param_path.write_text(parameter_text, encoding="utf-8")
     # Multithreaded elastix sums partial results in a load-dependent order; repeat once
     # before giving up.
     for attempt in range(2):
@@ -51,29 +135,70 @@ def invert_elastix_transform(transform_dir: Path, output_dir: Path | None = None
         inverted = _run_inversion_attempt(
             fixed_mhd=fixed_mhd,
             output_dir=output_dir,
-            coef_path=coef_files[0],
+            coef_path=coef_path,
             param_path=param_path,
         )
         if inverted is not None:
             return _finalize_inverted_transform(inverted)
-    msg = f"elastix inversion failed twice in {output_dir}. See elastix.log in that directory."
-    raise RuntimeError(msg)
+    return None
+
+
+def _roundtrip_probe(
+    fixed_mhd: Path, forward_coef: Path, work_dir: Path
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Tissue points of the fixed image (physical x, y, z) and their forward images."""
+    volume = read_mhd_volume(fixed_mhd)  # (Y, X, Z)
+    positive = volume[volume > 0]
+    if positive.size == 0:
+        return None
+    # Stay away from the image border, where the inverse is poorly constrained.
+    margin = np.minimum(ROUNDTRIP_MARGIN_VOXELS, np.array(volume.shape) // 4)
+    inner = np.zeros(volume.shape, dtype=bool)
+    inner[tuple(slice(m, n - m) for m, n in zip(margin, volume.shape, strict=True))] = True
+    idx = np.argwhere(inner & (volume > np.median(positive)))
+    if len(idx) == 0:
+        return None
+    rng = np.random.default_rng(0)
+    idx = idx[rng.choice(len(idx), size=min(ROUNDTRIP_POINTS, len(idx)), replace=False)]
+    spacing_xyz = read_mhd_spacing(fixed_mhd)
+    points = idx[:, [1, 0, 2]].astype(float) * spacing_xyz
+    mapped = run_transformix_physical_points(
+        points_xyz=points, transform_path=forward_coef, output_dir=work_dir
+    )
+    return points, mapped
+
+
+def _roundtrip_median_mm(
+    probe: tuple[np.ndarray, np.ndarray] | None, inverse: Path, work_dir: Path
+) -> float:
+    """Median |inverse(forward(x)) - x| over the probe points (0 when there is no probe)."""
+    if probe is None:
+        return 0.0
+    points, mapped = probe
+    back = run_transformix_physical_points(
+        points_xyz=mapped, transform_path=inverse, output_dir=work_dir
+    )
+    error = np.linalg.norm(back - points, axis=1)
+    error[~np.isfinite(error)] = np.inf
+    return float(np.median(error))
 
 
 def build_inversion_parameters(
     forward_text: str,
     *,
     iteration_factor: float = INVERSION_ITERATION_FACTOR,
+    sp_a: int | None = None,
 ) -> str:
     """Inversion parameter file from the forward one (invertElastixTransformCP edits).
 
     MATLAB edits: ``Registration`` -> MultiResolutionRegistration, ``Metric`` ->
     DisplacementMagnitudePenalty, ``NumberOfResolutions`` -> 1,
     ``ImagePyramidSchedule`` -> its last (finest) level, ``MaximumNumberOfIterations`` ->
-    last level x 1.5. Everything else (grid spacing, sampler, sample region, optimizer
-    settings) is kept from the forward run, as in MATLAB. Python additionally keeps only
-    the first entry of per-metric component lists (MATLAB's forward runs never have them)
-    and skips writing the result image, which only costs time.
+    last level x *iteration_factor*; ``SP_A`` -> *sp_a* when given. Everything else (grid
+    spacing, sampler, sample region, other optimizer settings) is kept from the forward run,
+    as in MATLAB. Python additionally keeps only the first entry of per-metric component
+    lists (MATLAB's forward runs never have them) and skips writing the result image, which
+    only costs time.
     """
     params = read_parameter_text(forward_text)
     dim = int(_first_number(params.get("FixedImageDimension"), default=3))
@@ -92,6 +217,8 @@ def build_inversion_parameters(
     params["ImagePyramidSchedule"] = schedule[-dim:] if schedule else ["1"] * dim
     iterations = params.get("MaximumNumberOfIterations") or ["2000"]
     params["MaximumNumberOfIterations"] = [str(round(float(iterations[-1]) * iteration_factor))]
+    if sp_a is not None:
+        params["SP_A"] = [str(sp_a)]
     params["WriteResultImage"] = ['"false"']
     return format_parameter_text(params)
 

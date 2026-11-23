@@ -25,11 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by a few µm (more for inverse B-splines in poorly constrained regions).
   `lightsuite doctor` checks for `itk-elastix` instead of the binaries.
 - B-spline inversion now matches matlab_elastix `invertElastixTransformCP` (2026-09):
-  `DisplacementMagnitudePenalty` only, finest pyramid level only, 1.5x the forward run's
-  final iterations, no landmarks. Previously Python re-ran the forward metrics (mutual
-  information, landmarks, bending energy) over all levels, which inverted less accurately
-  and could diverge. The "gentle" fallback schedule is gone; a failed inversion is
-  retried once.
+  `DisplacementMagnitudePenalty` only, finest pyramid level only, no landmarks, the forward
+  run's `SP_A`, and the forward run's final iterations x 2 for brains (as in
+  `multiobjRegistration.m`) or x 1.5 for the spinal cord. Previously Python re-ran the
+  forward metrics (mutual information, landmarks, bending energy) over all levels, which
+  could diverge and took ~2.5x longer. On seven brains the inversion takes 45-55 s and
+  maps tissue points back within a median of 2-7 µm (forward then inverse). After
+  inverting, the pipeline checks this round trip on 3000 tissue points; if the median is
+  above 25 µm (a diverged run), it reruns with `SP_A` 1 and keeps the better inverse
+  (`inversion_report.json` in the work folder records which). The "gentle" fallback
+  schedule is gone; a failed elastix run is retried once.
 - B-spline registration has no bending-energy penalty and uses 48 histogram bins, as in
   MATLAB `performMultObjBsplineRegistration.m` (Python used a penalty of weight 2.0 and 32
   bins). `registration.bspline_bending_weight` is no longer a setting: older configs still
