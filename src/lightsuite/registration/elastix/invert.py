@@ -171,13 +171,23 @@ def _roundtrip_probe(
 def _roundtrip_median_mm(
     probe: tuple[np.ndarray, np.ndarray] | None, inverse: Path, work_dir: Path
 ) -> float:
-    """Median |inverse(forward(x)) - x| over the probe points (0 when there is no probe)."""
+    """Median |inverse(forward(x)) - x| over the probe points (0 when there is no probe).
+
+    A blown-up inverse can make transformix fail or return non-finite points; that counts
+    as an infinite error, so the caller falls back instead of aborting.
+    """
     if probe is None:
         return 0.0
     points, mapped = probe
-    back = run_transformix_physical_points(
-        points_xyz=mapped, transform_path=inverse, output_dir=work_dir
-    )
+    try:
+        back = run_transformix_physical_points(
+            points_xyz=mapped, transform_path=inverse, output_dir=work_dir
+        )
+    except (OSError, ValueError, backend.ElastixError) as exc:
+        logger.warning("B-spline inversion: round-trip check failed on %s (%s).", inverse, exc)
+        return float("inf")
+    if back.shape != points.shape:
+        return float("inf")
     error = np.linalg.norm(back - points, axis=1)
     error[~np.isfinite(error)] = np.inf
     return float(np.median(error))

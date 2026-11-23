@@ -472,7 +472,39 @@ def test_invert_falls_back_to_sp_a_1_when_round_trip_fails(tmp_path: Path, monke
     assert sp_a_used == ["20", "1"]
     assert result.parent.name == "inverse"
 
+    # A blown-up first inverse that makes transformix fail (or return NaN) counts as diverged.
+    monkeypatch.undo()
+    monkeypatch.setattr(invert, "read_mhd_spacing", lambda _p: [0.02] * 3)
+    monkeypatch.setattr(backend, "elastix", fake_elastix)
+    points = np.zeros((4, 3))
+    monkeypatch.setattr(invert, "_roundtrip_probe", lambda *a: (points, points))
+
+    def fake_transformix(*, points_xyz, transform_path, output_dir):
+        if sp_a_used[-1] == "20":
+            raise backend.ElastixError("transformix failed")
+        return points_xyz + 0.001
+
+    monkeypatch.setattr(invert, "run_transformix_physical_points", fake_transformix)
+    sp_a_used.clear()
+    result = invert.invert_elastix_transform(run, tmp_path / "inverse", iteration_factor=2.0)
+    assert sp_a_used == ["20", "1"] and result.parent.name == "sp_a_1"
+    assert invert._roundtrip_median_mm((points, points), result, tmp_path) == pytest.approx(
+        np.sqrt(3) * 0.001
+    )
+
+    def nan_transformix(*, points_xyz, transform_path, output_dir):
+        return np.full_like(points_xyz, np.nan)
+
+    monkeypatch.setattr(invert, "run_transformix_physical_points", nan_transformix)
+    assert invert._roundtrip_median_mm((points, points), result, tmp_path) == float("inf")
+
     # A good first inverse needs no second run.
+    monkeypatch.setattr(invert, "_roundtrip_probe", lambda *a: ("probe",))
+    monkeypatch.setattr(
+        invert,
+        "_roundtrip_median_mm",
+        lambda probe, inverse, work: errors_mm[sp_a_used[-1]],
+    )
     errors_mm.update({"20": 0.005})
     sp_a_used.clear()
     invert.invert_elastix_transform(run, tmp_path / "inverse", iteration_factor=2.0)
