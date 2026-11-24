@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -59,10 +58,13 @@ from lightsuite.registration.correspondence_affine import (
     append_correspondence_bspline_landmarks,
     apply_slice_correspondence_affine,
 )
+from lightsuite.registration.elastix.backend import require_elastix
 from lightsuite.registration.elastix.invert import (
+    BRAIN_INVERSION_ITERATION_FACTOR,
     invert_elastix_transform,
     write_inverted_transform_copy,
 )
+from lightsuite.registration.elastix.params import BSPLINE_HISTOGRAM_BINS
 from lightsuite.registration.elastix.points import volume_indices_to_elastix_physical
 from lightsuite.registration.elastix.runner import (
     read_elastix_landmark_metric_mm,
@@ -225,9 +227,7 @@ def validate_registration_inputs(
             "registration quality may be poor."
         )
 
-    if shutil.which("elastix") is None or shutil.which("transformix") is None:
-        msg = "elastix and transformix must be on PATH for brain register."
-        raise RuntimeError(msg)
+    require_elastix("brain register")
 
     return checkpoint, session
 
@@ -591,12 +591,11 @@ def run_brain_registration(config: BrainPipelineConfig, *, use_multistep: bool =
         save_path=save_path,
         spacing_mm=spacing_mm,
         control_point_weight=cpwt,
-        n_histogram_bins=32,
+        n_histogram_bins=BSPLINE_HISTOGRAM_BINS,
         bspline_spatial_scale_mm=config.registration.bspline_spatial_scale_mm,
         use_multistep=use_multistep,
         dual_weight_autofluor=config.registration.dual_channel_mi_weight_primary,
         dual_weight_signal=config.registration.dual_channel_mi_weight_secondary,
-        bending_energy_weight=config.registration.bspline_bending_weight,
     )
     bspline_elapsed = time.perf_counter() - t0
     emit_pipeline_message(
@@ -638,12 +637,9 @@ def run_brain_registration(config: BrainPipelineConfig, *, use_multistep: bool =
 
     emit_pipeline_message("Register: inverting B-spline transform…")
     inverse_dir = brain_work_dir(save_path, ELASTIX_INVERSE_TEMP)
-    inverted = invert_elastix_transform(elastix_temp, inverse_dir)
-    if (inverse_dir / "inversion_parameters_gentle.txt").is_file():
-        console.print(
-            "[yellow]B-spline inversion:[/yellow] used gentle single-resolution schedule "
-            "(full multistep inversion diverged at high resolution)."
-        )
+    inverted = invert_elastix_transform(
+        elastix_temp, inverse_dir, iteration_factor=BRAIN_INVERSION_ITERATION_FACTOR
+    )
     samp_to_atlas_path = save_path / "bspline_samp_to_atlas_20um.txt"
     write_inverted_transform_copy(inverted, samp_to_atlas_path)
 
@@ -675,7 +671,6 @@ def run_brain_registration(config: BrainPipelineConfig, *, use_multistep: bool =
         use_multistep=use_multistep,
         use_dual_channel_mi=use_dual,
         bspline_spatial_scale_mm=float(reg.bspline_spatial_scale_mm),
-        bspline_bending_weight=float(reg.bspline_bending_weight),
         dual_channel_mi_weight_primary=reg.dual_channel_mi_weight_primary if use_dual else None,
         dual_channel_mi_weight_secondary=reg.dual_channel_mi_weight_secondary if use_dual else None,
         affine_median_error_vox=affine_diag.median_error_vox,
@@ -713,7 +708,6 @@ def run_brain_registration(config: BrainPipelineConfig, *, use_multistep: bool =
         control_point_weight=cpwt,
         use_multistep=use_multistep,
         use_dual_channel_mi=use_dual,
-        bspline_bending_weight=float(reg.bspline_bending_weight),
         dual_channel_mi_weight_primary=reg.dual_channel_mi_weight_primary
         if use_dual
         else None,

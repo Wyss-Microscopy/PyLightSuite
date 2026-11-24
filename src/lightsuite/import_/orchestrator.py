@@ -8,7 +8,6 @@ loading, native-bounds validation, the summary JSON — lives here.
 from __future__ import annotations
 
 import json
-import shutil
 import time
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -23,6 +22,7 @@ from lightsuite.config.models import (
 from lightsuite.import_.adapters import load_annotation, prepare_points_for_sample
 from lightsuite.import_.models import AnnotationImportResult, ImportedMask, ImportedPoints
 from lightsuite.import_.sample_reference import SampleReference
+from lightsuite.registration.elastix.backend import require_elastix
 
 console = Console()
 
@@ -130,9 +130,7 @@ def resolve_write_csv(import_config: ImportConfig | None, write_csv: bool | None
 
 
 def require_transformix() -> None:
-    if shutil.which("transformix") is None:
-        msg = "transformix must be on PATH for annotation import."
-        raise RuntimeError(msg)
+    require_elastix("annotation import")
 
 
 def _summary_entry(result: AnnotationImportResult) -> dict[str, object]:

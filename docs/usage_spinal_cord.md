@@ -2,7 +2,7 @@
 
 This guide registers a stitched spinal cord lightsheet volume to the [Fiederling et al. (2021)](https://www.sciencedirect.com/science/article/pii/S2667237521001260) spinal cord atlas and computes per-region, per-segment statistics.
 
-Before you start, finish the [installation](installation.md) with the `gui` extra and Elastix 5.1.0, and download the [Fiederling atlas](installation.md#fiederling-spinal-cord-atlas). BCPD is not used by the spinal workflow.
+Before you start, finish the [installation](installation.md) with the `gui` extra, and download the [Fiederling atlas](installation.md#fiederling-spinal-cord-atlas). BCPD is not used by the spinal workflow.
 
 For whole brains, see [Brain lightsheet](usage_lightsheet_brain.md).
 

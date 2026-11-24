@@ -46,6 +46,8 @@ dependencies = [
     "imagecodecs>=2024.1",
     "open3d>=0.18",
     "openpyxl>=3.1.5",
+    # elastix / transformix as a Python library (no separate Elastix install).
+    "itk-elastix>=0.25.3,<0.26",
 ]
 
 [project.urls]

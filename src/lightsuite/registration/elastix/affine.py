@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from lightsuite.registration.elastix import backend
 from lightsuite.registration.elastix.mhd import scale_volume_for_elastix_mi, write_mhd
 from lightsuite.registration.elastix.params import write_parameter_file
 from lightsuite.registration.elastix.runner import clear_elastix_workspace
@@ -67,10 +66,6 @@ def run_affine_registration(
     output_path: Path | None = None,
 ) -> AffineRegistrationResult:
     """Run elastix affine registration (moving → fixed)."""
-    if shutil.which("elastix") is None:
-        msg = "elastix not found on PATH"
-        raise RuntimeError(msg)
-
     save_path = save_path.expanduser()
     output_dir = (work_dir or save_path / "elastix_temp_affine").expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -85,26 +80,12 @@ def run_affine_registration(
     write_mhd(scale_volume_for_elastix_mi(fixed_volume), fixed_mhd, sp)
     write_mhd(scale_volume_for_elastix_mi(moving_volume), moving_mhd, sp)
 
-    cmd = [
-        "elastix",
-        "-f",
-        str(fixed_mhd.with_suffix(".mhd")),
-        "-m",
-        str(moving_mhd.with_suffix(".mhd")),
-        "-out",
-        str(output_dir),
-        "-p",
-        str(param_path),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        msg = f"elastix affine failed (exit {result.returncode}):\n{result.stdout}\n{result.stderr}"
-        raise RuntimeError(msg)
-
-    transforms = sorted(output_dir.glob("TransformParameters.*.txt"))
-    if not transforms:
-        msg = f"No TransformParameters.*.txt in {output_dir}"
-        raise RuntimeError(msg)
+    transforms = backend.elastix(
+        fixed=fixed_mhd.with_suffix(".mhd"),
+        moving=moving_mhd.with_suffix(".mhd"),
+        parameter_files=param_path,
+        output_dir=output_dir,
+    )
 
     copied = (output_path or save_path / output_name).expanduser()
     copied.parent.mkdir(parents=True, exist_ok=True)

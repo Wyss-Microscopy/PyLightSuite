@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
-from scipy.interpolate import interpn
 
 from lightsuite.gui.affine import transform_points
 from lightsuite.registration.brain_register import TransformParamsCheckpoint
 from lightsuite.registration.canvas import RegistrationCanvas, offset_volume_indices
 from lightsuite.registration.coordinates import registration_indices_uncropped_to_cropped
-from lightsuite.registration.elastix.runner import run_transformix_deformation_field
+from lightsuite.registration.elastix.runner import run_transformix_points
 from lightsuite.registration.points import volume_indices_to_cloud_xyz
 
 
@@ -78,7 +78,7 @@ def sample_points_to_registration_voxels(
     native indices, apply content/canvas crops, then ``permute_brain_volume``.
 
     Does **not** apply elastix working-canvas ``pad_before`` — that offset belongs only
-    on the B-spline displacement grid used by :func:`transform_points_to_atlas`.
+    on the elastix working grid used by :func:`transform_points_to_atlas`.
     """
     pts = np.asarray(points_xyz_1based, dtype=np.float64)
     if pts.ndim != 2 or pts.shape[1] < 3:
@@ -120,60 +120,62 @@ def canvas_pad_before(
     return None
 
 
-def _displacement_field_registration_voxels(
-    transform_params: TransformParamsCheckpoint,
+BSPLINE_ATLAS_TO_SAMP_FILENAME = "bspline_atlas_to_samp_20um.txt"
+
+
+def forward_bspline_transform_path(inverse_path: Path) -> Path:
+    """Forward B-spline (``bspline_atlas_to_samp_20um.txt``) saved next to the inverse."""
+    forward = Path(inverse_path).with_name(BSPLINE_ATLAS_TO_SAMP_FILENAME)
+    if not forward.is_file():
+        msg = (
+            f"Missing forward B-spline transform {forward} (needed to map points to the "
+            "atlas). Re-run register for this sample."
+        )
+        raise FileNotFoundError(msg)
+    return forward
+
+
+def apply_forward_bspline_to_points(
+    points_yxz: np.ndarray,
+    forward_transform: Path,
     *,
-    cache_dir: Path,
-    registres_um: float,
+    temp_dir: Path,
 ) -> np.ndarray:
-    """Load B-spline displacement field scaled to registration voxel units (Y,X,Z,3)."""
-    del registres_um
-    regsize_mm = float(transform_params.atlas_resolution_um) * 2.0 * 1e-3
-    field_mm = run_transformix_deformation_field(
-        transform_path=Path(transform_params.tform_bspline_samp20um_to_atlas_20um_px),
-        output_dir=cache_dir,
+    """Push 0-based registration-grid ``y,x,z`` points through the forward B-spline.
+
+    The forward elastix transform maps a sample-grid point to its position in the
+    affine-warped atlas, which is where a point feature belongs. MATLAB's
+    ``transformPointsToAtlas`` instead subtracts the inverse transform's displacement
+    sampled at the *sample* position, a first-order approximation that is off where the
+    deformation is large. Points outside the B-spline grid keep their position.
+    """
+    pts = np.asarray(points_yxz, dtype=np.float64)
+    if pts.size == 0:
+        return pts.reshape(0, 3)
+    return run_transformix_points(
+        points_yxz=pts,
+        transform_path=forward_transform,
+        output_dir=temp_dir,
+        spacing_mm=transform_grid_spacing_mm(forward_transform),
     )
-    return field_mm / regsize_mm
 
 
-def interpolate_bspline_displacement(
-    reg_points_yxz: np.ndarray,
-    displacement_field_yxz: np.ndarray,
-) -> np.ndarray:
-    """Trilinear displacement sampling on the permuted registration grid (Y, X, Z)."""
-    pts = np.asarray(reg_points_yxz, dtype=np.float64)
-    field = np.asarray(displacement_field_yxz, dtype=np.float64)
-    sy, sx, sz, _ = field.shape
-    grid_y = np.arange(1, sy + 1)
-    grid_x = np.arange(1, sx + 1)
-    grid_z = np.arange(1, sz + 1)
-    dx = interpn(
-        (grid_y, grid_x, grid_z),
-        field[:, :, :, 0],
-        pts,
-        method="linear",
-        bounds_error=False,
-        fill_value=np.nan,
-    )
-    dy = interpn(
-        (grid_y, grid_x, grid_z),
-        field[:, :, :, 1],
-        pts,
-        method="linear",
-        bounds_error=False,
-        fill_value=np.nan,
-    )
-    dz = interpn(
-        (grid_y, grid_x, grid_z),
-        field[:, :, :, 2],
-        pts,
-        method="linear",
-        bounds_error=False,
-        fill_value=np.nan,
-    )
-    disp = -np.column_stack([dx, dy, dz])
-    disp[np.isnan(disp)] = 0.0
-    return disp
+def transform_grid_spacing_mm(transform_path: Path) -> float:
+    """Isotropic grid spacing (mm) of an elastix transform with a zero origin."""
+    text = Path(transform_path).read_text(encoding="utf-8", errors="replace")
+    spacing = re.search(r"\(Spacing\s+([^)]+)\)", text)
+    origin = re.search(r"\(Origin\s+([^)]+)\)", text)
+    if spacing is None:
+        msg = f"No (Spacing ...) in {transform_path}"
+        raise ValueError(msg)
+    values = [float(v) for v in spacing.group(1).split()]
+    if max(values) - min(values) > 1e-9 * max(values):
+        msg = f"Anisotropic transform grid {values} in {transform_path} is not supported"
+        raise ValueError(msg)
+    if origin is not None and any(abs(float(v)) > 1e-9 for v in origin.group(1).split()):
+        msg = f"Non-zero transform origin in {transform_path} is not supported"
+        raise ValueError(msg)
+    return values[0]
 
 
 def transform_points_to_atlas(
@@ -197,13 +199,13 @@ def transform_points_to_atlas(
     if pad_before is not None:
         # Displacement field is on the padded elastix working grid.
         reg_for_field = offset_volume_indices(reg_yxz, pad_before)
-    displacement = _displacement_field_registration_voxels(
-        transform_params,
-        cache_dir=temp_dir / "deformation_field",
-        registres_um=registres_um,
+    forward = forward_bspline_transform_path(
+        Path(transform_params.tform_bspline_samp20um_to_atlas_20um_px)
     )
-    warped_yxz = reg_for_field + interpolate_bspline_displacement(
-        reg_for_field, displacement
+    warped_yxz = apply_forward_bspline_to_points(
+        reg_for_field,
+        forward,
+        temp_dir=temp_dir / "bspline_points",
     )
     if pad_before is not None:
         # The affine expects unpadded registration-grid indices.

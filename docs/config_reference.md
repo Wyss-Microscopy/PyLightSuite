@@ -71,7 +71,6 @@ LightSuite configs are YAML files validated by Pydantic models in `src/lightsuit
 | `registration.dual_channel_mi_weight_secondary` | GUI | `0.4` | Dual MI weight for secondary channel (alias: `dual_channel_mi_weight_signal`) |
 | `registration.orientation` | GUI | from `brain_orientation.txt` | Axis permutation, e.g. `[1, -3, 2]`; empty in GUI = omit (use check-orientation) |
 | `registration.canvas_mode` | GUI | `off` | Working grid: `off`, `pad`, `crop`, `union` |
-| `registration.bspline_bending_weight` | YAML | `2.0` | B-spline smoothness penalty; raise if outlines look wavy (0 = off, as in MATLAB) |
 | `registration.cloud_threshold` | YAML | `5.0` | Init-registration point-cloud threshold; lower (e.g. `3.0`) for sparse samples |
 | `registration.sample_cloud_subsample` | YAML | `0.1` | Fraction of gradient points kept |
 | `registration.outlier_ratio` | YAML | `0.01` | Outlier rejection ratio |

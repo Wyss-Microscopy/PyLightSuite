@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import nibabel as nib
@@ -16,6 +15,7 @@ from lightsuite.gui.brain_data import prepare_brain_match_points_session
 from lightsuite.preprocess.brain import preprocess_lightsheet_volume
 from lightsuite.gui.control_points import default_session_path
 from lightsuite.registration.brain_register import validate_registration_inputs
+from lightsuite.registration.elastix.backend import elastix_available
 from lightsuite.registration.init_brain import initialize_brain_registration
 
 
@@ -24,8 +24,8 @@ def _write_channel_stack(path: Path, slices: list[np.ndarray]) -> None:
 
 
 def test_validate_registration_inputs(tmp_path: Path) -> None:
-    if shutil.which("elastix") is None:
-        pytest.skip("elastix not on PATH")
+    if not elastix_available():
+        pytest.skip("itk-elastix not installed")
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -71,8 +71,8 @@ def test_validate_registration_inputs(tmp_path: Path) -> None:
 
 
 def test_validate_registration_without_manual_session(tmp_path: Path) -> None:
-    if shutil.which("elastix") is None:
-        pytest.skip("elastix not on PATH")
+    if not elastix_available():
+        pytest.skip("itk-elastix not installed")
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()

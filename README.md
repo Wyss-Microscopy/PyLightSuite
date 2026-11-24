@@ -50,7 +50,7 @@ uv run lightsuite brain run -c my_sample.yaml --through match-points
 
 Example configs are indexed in [`examples/README.md`](examples/README.md) (brain, spinal cord).
 
-**Requirements:** Python 3.11–3.12, [Elastix 5.1.0](https://github.com/SuperElastix/elastix/releases/tag/5.1.0) on `PATH`, and atlas NIfTI files. See the [installation guide](docs/installation.md) and [Hardware requirements](#hardware-requirements) below.
+**Requirements:** Python 3.11–3.12 and atlas NIfTI files. Elastix is installed with the Python dependencies ([`itk-elastix`](https://github.com/InsightSoftwareConsortium/ITKElastix)). See the [installation guide](docs/installation.md) and [Hardware requirements](#hardware-requirements) below.
 
 ---
 
@@ -104,7 +104,7 @@ See [Brain lightsheet → Migrating from MATLAB](docs/usage_lightsheet_brain.md#
 | Guide | Contents |
 |-------|----------|
 | [Home](docs/index.md) | Overview, quick start, documentation map |
-| [Installation](docs/installation.md) | Python, `uv`, Elastix, BCPD, atlas files |
+| [Installation](docs/installation.md) | Python, `uv`, BCPD, atlas files |
 | [Brain lightsheet](docs/usage_lightsheet_brain.md) | YAML config, CLI stages, outputs, GUI |
 | [Spinal cord](docs/usage_spinal_cord.md) | Straightening, registration, region statistics |
 | [Annotation import](docs/annotation_import.md) | Bringing external spots and masks into atlas space |

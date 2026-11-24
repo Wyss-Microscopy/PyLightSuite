@@ -15,8 +15,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `lightsuite brain info` / `lightsuite spinal info`.
 - **Docs**: new [output files](docs/outputs.md) page, generated from the same list of outputs.
 
+### Changed
+
+- Elastix and transformix now run through the `itk-elastix` Python package (a core
+  dependency) instead of the Elastix 5.1.0 binaries, so there is no separate Elastix install
+  or `PATH` setup. Elastix runs in a helper process, so the GUI stays responsive during
+  registration and Cancel stops a running registration. The bundled elastix is 5.3:
+  applying existing transforms gives identical results; new registrations differ from 5.1
+  by a few µm (more for inverse B-splines in poorly constrained regions).
+  `lightsuite doctor` checks for `itk-elastix` instead of the binaries.
+- B-spline inversion now matches matlab_elastix `invertElastixTransformCP` (2026-09):
+  `DisplacementMagnitudePenalty` only, finest pyramid level only, no landmarks, the forward
+  run's `SP_A`, and the forward run's final iterations x 2 for brains (as in
+  `multiobjRegistration.m`) or x 1.5 for the spinal cord. Previously Python re-ran the
+  forward metrics (mutual information, landmarks, bending energy) over all levels, which
+  could diverge and took ~2.5x longer. On seven brains the inversion takes 45-55 s and
+  maps tissue points back within a median of 2-7 µm (p95 8-71 µm) going forward then
+  inverse; on DK040 the old schedule was tighter at the tail (p95 6 µm vs 50 µm). After
+  inverting, the pipeline checks this round trip on 3000 tissue points; if the median is
+  above 25 µm, or the check itself fails (a diverged run), it reruns with `SP_A` 1 and
+  keeps the better inverse (`inversion_report.json` in the work folder records which).
+  The "gentle" fallback schedule is gone; a failed elastix run is retried once.
+- B-spline registration has no bending-energy penalty and uses 48 histogram bins, as in
+  MATLAB `performMultObjBsplineRegistration.m` (Python used a penalty of weight 2.0 and 32
+  bins). `registration.bspline_bending_weight` is no longer a setting: older configs still
+  load, and a non-zero value warns that it is ignored.
+
 ### Fixed
 
+- Brain and spinal cord point import (`import-annotations`) mapped points through the
+  inverse B-spline with the x and y displacement components swapped, misplacing cells by up
+  to hundreds of µm (on one brain, a third of the cells landed outside the brain). Points
+  are now pushed through the forward B-spline with transformix, which is exact; MATLAB's
+  `transformPointsToAtlas` uses a first-order approximation instead (median error ~19 µm
+  on the deposited TRAP2 brains). Registered volumes and intensity tables were not affected.
 - Docs: brain QC previews are written directly in `qc/`, not in `qc/initial/`, `qc/affine/`
   and `qc/bspline/`.
 

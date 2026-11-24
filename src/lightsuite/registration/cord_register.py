@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import time
 from pathlib import Path
 
@@ -33,6 +31,7 @@ from lightsuite.registration.cord_paths import (
     cord_work_dir,
 )
 from lightsuite.registration.cord_plots import save_cord_annotation_preview
+from lightsuite.registration.elastix import backend
 from lightsuite.registration.elastix.cord_bspline import build_cord_bspline_params
 from lightsuite.registration.elastix.invert import invert_elastix_transform
 from lightsuite.registration.elastix.mhd import scale_volume_for_elastix_mi, write_mhd
@@ -44,9 +43,7 @@ from lightsuite.reporter import check_stage_cancelled, emit_pipeline_message, fo
 
 def run_spinal_registration(config: SpinalCordPipelineConfig) -> Path:
     """Run cord B-spline elastix registration and write transform_params.json."""
-    if shutil.which("elastix") is None or shutil.which("transformix") is None:
-        msg = "elastix and transformix must be on PATH for spinal register."
-        raise RuntimeError(msg)
+    backend.require_elastix("spinal register")
 
     save_path = cord_save_path(config)
     qc_dir = cord_qc_dir(config)
@@ -175,29 +172,14 @@ def run_spinal_registration(config: SpinalCordPipelineConfig) -> Path:
     )
     check_stage_cancelled()
     t0 = time.perf_counter()
-    cmd = [
-        "elastix",
-        "-f",
-        str(fixed_mhd.with_suffix(".mhd")),
-        "-m",
-        str(moving_mhd.with_suffix(".mhd")),
-        "-out",
-        str(elastix_temp),
-        "-p",
-        str(param_path),
-    ]
-    if has_control_points:
-        cmd.extend(["-fp", str(fixpath), "-mp", str(movpath)])
-
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        msg = f"elastix cord B-spline failed:\n{proc.stdout}\n{proc.stderr}"
-        raise RuntimeError(msg)
-
-    transforms = sorted(elastix_temp.glob("TransformParameters.*.txt"))
-    if not transforms:
-        msg = "No B-spline transform written."
-        raise RuntimeError(msg)
+    transforms = backend.elastix(
+        fixed=fixed_mhd.with_suffix(".mhd"),
+        moving=moving_mhd.with_suffix(".mhd"),
+        parameter_files=param_path,
+        output_dir=elastix_temp,
+        fixed_points=fixpath if has_control_points else None,
+        moving_points=movpath if has_control_points else None,
+    )
     bspline_elapsed = time.perf_counter() - t0
     emit_pipeline_message(
         f"Register: B-spline elastix done in {format_duration(bspline_elapsed)} "

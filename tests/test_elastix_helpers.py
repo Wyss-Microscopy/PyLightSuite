@@ -128,49 +128,6 @@ def test_build_bspline_params_single_channel() -> None:
     assert params["ImageSampler"] == "RandomCoordinate"
 
 
-def test_build_bspline_params_adds_bending_energy_penalty() -> None:
-    params = build_bspline_params(
-        dual_channel=False,
-        control_point_weight=0.2,
-        n_histogram_bins=32,
-        bspline_spatial_scale_mm=1.0,
-        fixed_shape=(20, 20, 20),
-        spacing_mm=0.02,
-        bending_energy_weight=2.0,
-    )
-    assert params["Metric"] == [
-        "AdvancedMattesMutualInformation",
-        "CorrespondingPointsEuclideanDistanceMetric",
-        "TransformBendingEnergyPenalty",
-    ]
-    assert params["Metric0Weight"] == 1.0
-    assert params["Metric1Weight"] == 0.2
-    assert params["Metric2Weight"] == 2.0
-    # Elastix 5.1 wants 1 or NumberOfMetrics entries for these.
-    assert params["ImageSampler"] == ["RandomCoordinate"] * 3
-    assert params["FixedImagePyramid"] == ["FixedRecursiveImagePyramid"] * 3
-
-
-def test_build_bspline_params_dual_channel_with_bending_energy() -> None:
-    params = build_bspline_params(
-        dual_channel=True,
-        control_point_weight=0.3,
-        n_histogram_bins=32,
-        bspline_spatial_scale_mm=1.0,
-        fixed_shape=(20, 20, 20),
-        spacing_mm=0.02,
-        dual_weight_autofluor=0.4,
-        dual_weight_signal=0.5,
-        bending_energy_weight=2.0,
-    )
-    assert params["Metric"][-1] == "TransformBendingEnergyPenalty"
-    assert params["Metric0Weight"] == 0.4
-    assert params["Metric1Weight"] == 0.5
-    assert params["Metric2Weight"] == 0.3
-    assert params["Metric3Weight"] == 2.0
-    assert len(params["MovingImagePyramid"]) == 4
-
-
 def test_build_bspline_params_auto_only_matches_manual_schedule() -> None:
     # Auto-only (no manual landmarks) must use the same image-dominant, multi-resolution
     # schedule as MATLAB performMultObjBsplineRegistration.m; the caller halves cpwt.
@@ -360,32 +317,225 @@ def test_discover_transformix_result_nii_and_mhd(tmp_path: Path) -> None:
     assert _discover_transformix_result(tmp_path) == mhd
 
 
-def test_build_gentle_inversion_parameter_file(tmp_path: Path) -> None:
-    from lightsuite.registration.elastix.invert import _build_gentle_inversion_parameter_file
+def test_force_no_initial_transform_new_spelling() -> None:
+    """elastix 5.2+ (itk-elastix) writes InitialTransformParameterFileName."""
+    text = '(InitialTransformParameterFileName "/abs/elastix_temp/TransformParameters.0.txt")\n'
+    fixed = _force_no_initial_transform(text)
+    assert fixed == '(InitialTransformParameterFileName "NoInitialTransform")\n'
 
-    forward = tmp_path / "forward.txt"
-    forward.write_text(
-        "\n".join(
-            [
-                "(NumberOfResolutions 4)",
-                "(ImagePyramidSchedule 8 8 8 4 4 4 2 2 2 1 1 1)",
-                "(MaximumNumberOfIterations 500 1000 1500 2000)",
-                "(SampleRegionSize 2.34 2.34 2.34 2.34 2.34 2.34 2.34 2.34 2.34 2 2 2)",
-                "(Metric \"AdvancedMattesMutualInformation\" \"AdvancedMattesMutualInformation\" "
-                "\"CorrespondingPointsEuclideanDistanceMetric\")",
-            ]
-        ),
+
+def test_build_inversion_parameters_matches_matlab() -> None:
+    """invertElastixTransformCP: DMP metric, finest level only, 1.5x last iterations."""
+    from lightsuite.registration.elastix.invert import (
+        build_inversion_parameters,
+        read_parameter_text,
+    )
+    from lightsuite.registration.elastix.params import _format_param
+
+    forward = build_bspline_params(
+        dual_channel=False,
+        control_point_weight=0.2,
+        n_histogram_bins=32,
+        bspline_spatial_scale_mm=0.64,
+        fixed_shape=(400, 300, 500),
+        spacing_mm=0.02,
+        use_multistep=True,
+    )
+    lines = [_format_param(key, value) for key, value in forward.items()]
+    out = read_parameter_text(build_inversion_parameters("\n".join(lines)))
+
+    assert out["Registration"] == ['"MultiResolutionRegistration"']
+    assert out["Metric"] == ['"DisplacementMagnitudePenalty"']
+    assert out["NumberOfResolutions"] == ["1"]
+    assert out["ImagePyramidSchedule"] == ["1", "1", "1"]
+    assert out["MaximumNumberOfIterations"] == ["3000"]
+    assert not any(k.startswith("Metric") and k.endswith("Weight") for k in out)
+    for key in ("FixedImagePyramid", "MovingImagePyramid", "ImageSampler", "Interpolator"):
+        assert len(out[key]) == 1
+    # Kept from the forward run, as in MATLAB.
+    assert out["FinalGridSpacingInPhysicalUnits"] == ["0.64", "0.64", "0.64"]
+    assert out["SampleRegionSize"] == [f"{v:.12g}" for v in forward["SampleRegionSize"]]
+    assert out["SP_A"] == ["20"]
+    assert not any("BendingEnergy" in v for vals in out.values() for v in vals)
+
+    # multiobjRegistration.m calls invertElastixTransformCP(..., 2) for brains.
+    from lightsuite.registration.elastix.invert import BRAIN_INVERSION_ITERATION_FACTOR
+
+    brain = read_parameter_text(
+        build_inversion_parameters(
+            "\n".join(lines), iteration_factor=BRAIN_INVERSION_ITERATION_FACTOR
+        )
+    )
+    assert brain["MaximumNumberOfIterations"] == ["4000"]
+    fallback = read_parameter_text(build_inversion_parameters("\n".join(lines), sp_a=1))
+    assert fallback["SP_A"] == ["1"]
+
+
+def test_invert_runs_dmp_without_landmarks_and_retries(tmp_path: Path, monkeypatch) -> None:
+    import json
+
+    from lightsuite.registration.elastix import backend, invert
+
+    run = tmp_path / "elastix"
+    run.mkdir()
+    (run / "fixed.mhd").write_text("", encoding="utf-8")
+    (run / "fixed.txt").write_text("point\n0\n", encoding="utf-8")
+    (run / "moving.txt").write_text("point\n0\n", encoding="utf-8")
+    params = run / "bspline_parameters.txt"
+    params.write_text(
+        '(Metric "AdvancedMattesMutualInformation" "CorrespondingPointsEuclideanDistanceMetric")\n'
+        "(NumberOfResolutions 4)\n(MaximumNumberOfIterations 500 1000 1500 2000)\n",
         encoding="utf-8",
     )
-    gentle = _build_gentle_inversion_parameter_file(forward, tmp_path / "gentle.txt")
-    text = gentle.read_text(encoding="utf-8")
-    assert "(NumberOfResolutions 1)" in text
-    assert "1 1 1 1 1 1 1 1 1" in text
-    assert "(MaximumNumberOfIterations 500)" in text
-    assert "2 2 2 2 2 2 2 2 2" in text
+    (run / "TransformParameters.0.txt").write_text('(Transform "BSplineTransform")\n', encoding="utf-8")
+    (run / backend.CALL_RECORD_NAME).write_text(
+        json.dumps({"fixed": [str(run / "fixed.mhd")], "parameter_files": [str(params)]}),
+        encoding="utf-8",
+    )
+    calls: list[dict] = []
+
+    def fake_elastix(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise backend.ElastixError("diverged")
+        out = kwargs["output_dir"] / "TransformParameters.0.txt"
+        out.write_text('(InitialTransformParameterFileName "x")\n', encoding="utf-8")
+        return [out]
+
+    monkeypatch.setattr(invert, "read_mhd_spacing", lambda _p: [0.02] * 3)
+    monkeypatch.setattr(backend, "elastix", fake_elastix)
+    result = invert.invert_elastix_transform(run, tmp_path / "inverse")
+
+    assert len(calls) == 2
+    for call in calls:
+        assert "fixed_points" not in call and "moving_points" not in call
+        assert call["fixed"] == call["moving"] == run / "fixed.mhd"
+        assert call["initial_transform"] == run / "TransformParameters.0.txt"
+        text = call["parameter_files"].read_text(encoding="utf-8")
+        assert '(Metric "DisplacementMagnitudePenalty")' in text
+        assert "(MaximumNumberOfIterations 3000)" in text
+    assert "NoInitialTransform" in result.read_text(encoding="utf-8")
+    # No usable fixed image here, so no round-trip check and no SP_A 1 fallback.
+    report = json.loads((tmp_path / "inverse" / invert.INVERSION_REPORT_FILE).read_text())
+    assert report["sp_a"] == "forward" and report["roundtrip_median_um"] is None
 
 
-    vol = np.ones((4, 5, 6), dtype=np.float32)
-    out = warp_volume_affine(vol, np.eye(4), vol.shape, order=0)
-    assert out.shape == vol.shape
-    assert np.allclose(out, 1.0)
+def test_invert_falls_back_to_sp_a_1_when_round_trip_fails(tmp_path: Path, monkeypatch) -> None:
+    """Forward SP_A first; a failed round trip reruns with SP_A 1 and keeps the better one."""
+    import json
+
+    from lightsuite.registration.elastix import backend, invert
+
+    run = tmp_path / "elastix"
+    run.mkdir()
+    (run / "fixed.mhd").write_text("", encoding="utf-8")
+    params = run / "bspline_parameters.txt"
+    params.write_text(
+        '(Metric "AdvancedMattesMutualInformation")\n(NumberOfResolutions 2)\n'
+        "(MaximumNumberOfIterations 500 1000)\n(SP_A 20)\n",
+        encoding="utf-8",
+    )
+    (run / "TransformParameters.0.txt").write_text('(Transform "BSplineTransform")\n', encoding="utf-8")
+    (run / backend.CALL_RECORD_NAME).write_text(
+        json.dumps({"fixed": [str(run / "fixed.mhd")], "parameter_files": [str(params)]}),
+        encoding="utf-8",
+    )
+    sp_a_used: list[str] = []
+
+    def fake_elastix(**kwargs):
+        text = kwargs["parameter_files"].read_text(encoding="utf-8")
+        sp_a_used.append(text.split("(SP_A ")[1].split(")")[0])
+        out = kwargs["output_dir"] / "TransformParameters.0.txt"
+        out.write_text('(InitialTransformParameterFileName "x")\n', encoding="utf-8")
+        return [out]
+
+    errors_mm = {"20": 0.200, "1": 0.010}  # forward SP_A diverged; SP_A 1 converged
+    monkeypatch.setattr(invert, "read_mhd_spacing", lambda _p: [0.02] * 3)
+    monkeypatch.setattr(backend, "elastix", fake_elastix)
+    monkeypatch.setattr(invert, "_roundtrip_probe", lambda *a: ("probe",))
+    monkeypatch.setattr(
+        invert,
+        "_roundtrip_median_mm",
+        lambda probe, inverse, work: errors_mm[sp_a_used[-1]],
+    )
+    result = invert.invert_elastix_transform(run, tmp_path / "inverse", iteration_factor=2.0)
+
+    assert sp_a_used == ["20", "1"]
+    assert result.parent.name == "sp_a_1"
+    report = json.loads((tmp_path / "inverse" / invert.INVERSION_REPORT_FILE).read_text())
+    assert report["sp_a"] == 1 and report["roundtrip_median_um"] == 10.0
+
+    # Both fail the check: keep the one with the smaller error (here the forward SP_A).
+    errors_mm.update({"20": 0.040, "1": 0.090})
+    sp_a_used.clear()
+    result = invert.invert_elastix_transform(run, tmp_path / "inverse", iteration_factor=2.0)
+    assert sp_a_used == ["20", "1"]
+    assert result.parent.name == "inverse"
+
+    # A blown-up first inverse that makes transformix fail (or return NaN) counts as diverged.
+    monkeypatch.undo()
+    monkeypatch.setattr(invert, "read_mhd_spacing", lambda _p: [0.02] * 3)
+    monkeypatch.setattr(backend, "elastix", fake_elastix)
+    points = np.zeros((4, 3))
+    monkeypatch.setattr(invert, "_roundtrip_probe", lambda *a: (points, points))
+
+    def fake_transformix(*, points_xyz, transform_path, output_dir):
+        if sp_a_used[-1] == "20":
+            raise backend.ElastixError("transformix failed")
+        return points_xyz + 0.001
+
+    monkeypatch.setattr(invert, "run_transformix_physical_points", fake_transformix)
+    sp_a_used.clear()
+    result = invert.invert_elastix_transform(run, tmp_path / "inverse", iteration_factor=2.0)
+    assert sp_a_used == ["20", "1"] and result.parent.name == "sp_a_1"
+    assert invert._roundtrip_median_mm((points, points), result, tmp_path) == pytest.approx(
+        np.sqrt(3) * 0.001
+    )
+
+    def nan_transformix(*, points_xyz, transform_path, output_dir):
+        return np.full_like(points_xyz, np.nan)
+
+    monkeypatch.setattr(invert, "run_transformix_physical_points", nan_transformix)
+    assert invert._roundtrip_median_mm((points, points), result, tmp_path) == float("inf")
+
+    # A good first inverse needs no second run.
+    monkeypatch.setattr(invert, "_roundtrip_probe", lambda *a: ("probe",))
+    monkeypatch.setattr(
+        invert,
+        "_roundtrip_median_mm",
+        lambda probe, inverse, work: errors_mm[sp_a_used[-1]],
+    )
+    errors_mm.update({"20": 0.005})
+    sp_a_used.clear()
+    invert.invert_elastix_transform(run, tmp_path / "inverse", iteration_factor=2.0)
+    assert sp_a_used == ["20"]
+
+
+def test_build_bspline_params_has_no_bending_penalty_and_48_bins() -> None:
+    """MATLAB performMultObjBsplineRegistration: MI + landmarks only, 48 histogram bins."""
+    from lightsuite.registration.elastix.params import BSPLINE_HISTOGRAM_BINS
+
+    for dual in (False, True):
+        params = build_bspline_params(
+            dual_channel=dual,
+            control_point_weight=0.2,
+            n_histogram_bins=BSPLINE_HISTOGRAM_BINS,
+            bspline_spatial_scale_mm=0.64,
+            fixed_shape=(400, 300, 500),
+            spacing_mm=0.02,
+        )
+        assert "TransformBendingEnergyPenalty" not in params["Metric"]
+        assert params["NumberOfHistogramBins"] == 48
+
+
+def test_config_ignores_bending_weight(tmp_path: Path) -> None:
+    import warnings
+
+    from lightsuite.config.models import RegistrationConfig
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        RegistrationConfig.model_validate({"bspline_bending_weight": 0})
+    with pytest.warns(UserWarning, match="bspline_bending_weight"):
+        cfg = RegistrationConfig.model_validate({"bspline_bending_weight": 2.0})
+    assert not hasattr(cfg, "bspline_bending_weight")

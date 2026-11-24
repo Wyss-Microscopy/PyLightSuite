@@ -16,7 +16,7 @@ It is a Python port of the registration core of the [original MATLAB LightSuite]
 
 ## Start here
 
-1. **[Install](installation.md)** PyLightSuite, Elastix, BCPD and an atlas.
+1. **[Install](installation.md)** PyLightSuite, BCPD and an atlas.
 2. Copy one of config.yaml template from [`examples/`](https://github.com/Wyss-Microscopy/PyLightSuite/tree/main/examples) and edit its paths. Or create it using the GUI by filling the paths and selecting the options. 
 3. Check the setup: `uv run lightsuite doctor -c my_sample.yaml`.
 4. Follow the workflow guide, or run all stages in order with `uv run lightsuite brain run -c my_sample.yaml` (or `spinal run`).
@@ -43,7 +43,7 @@ Built-in cell detection, the widefield coronal slice module, probe tracing, the 
 
 ## All guides
 
-1. **[Installation](installation.md)**: Python environment, Elastix, BCPD, atlases, tests, troubleshooting
+1. **[Installation](installation.md)**: Python environment, BCPD, atlases, tests, troubleshooting
 2. **[Brain lightsheet](usage_lightsheet_brain.md)**: brain config, every stage, outputs, tuning
 3. **[Spinal cord](usage_spinal_cord.md)**: spinal config, every stage, region statistics
 4. **[Annotation import](annotation_import.md)**: external cells and masks into atlas space

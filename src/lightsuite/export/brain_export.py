@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +43,7 @@ from lightsuite.registration.brain_paths import (
     cleanup_legacy_brain_work,
 )
 from lightsuite.registration.brain_register import TransformParamsCheckpoint
+from lightsuite.registration.elastix.backend import require_elastix
 from lightsuite.registration.volume import load_registration_volume
 
 console = Console()
@@ -92,9 +92,7 @@ def export_registered_brain_volumes(
     spaces: list[str] | None = None,
 ) -> BrainExportResult:
     """Apply transforms and optionally write registered volumes and parcellation CSVs."""
-    if shutil.which("transformix") is None:
-        msg = "transformix must be on PATH for brain export."
-        raise RuntimeError(msg)
+    require_elastix("brain export")
 
     save_path = config.sample.save_path.expanduser()
     regopts_path = save_path / "regopts.json"

@@ -2,7 +2,7 @@
 
 This guide takes a stitched whole-brain lightsheet volume to atlas-space registered volumes and per-region intensity tables.
 
-Before you start, finish the [installation](installation.md): PyLightSuite with the `gui` extra, Elastix 5.1.0, BCPD, and an Allen, Perens or BrainGlobe atlas. You also need:
+Before you start, finish the [installation](installation.md): PyLightSuite with the `gui` extra, BCPD, and an Allen, Perens or BrainGlobe atlas. You also need:
 
 - the stitched TIFF data (Terastitcher, BigStitcher, SmartSPIM or similar),
 - the native **voxel size** in µm, as `[x, y, z]`,
@@ -229,7 +229,6 @@ The slice-correspondence steps can be turned off with `registration.use_slice_co
 
 If the affine preview looks right but the B-spline preview shows tangled region outlines, the deformation has more freedom than the image data can constrain. This is common on wide camera frames where the brain fills only part of the field.
 
-- Raise `registration.bspline_bending_weight` (default `2.0`). This is a smoothness penalty; `0` turns it off.
 - Raise `registration.bspline_spatial_scale_mm` from `0.64` to about `1.0`. This coarsens the B-spline grid about threefold and often *improves* landmark agreement on wide frames.
 - Set `registration.sample_content_crop: auto` to crop the registration volume to the brain.
 
@@ -356,12 +355,10 @@ registration:
 | `transformPointsToAtlas.m` | `brain import-annotations` |
 | `regopts.mat`, `atlas2histology_tform.mat`, `transform_params.mat` | the same names with `.json` |
 
-The same TIFF layouts, atlas files and Elastix version work in both. MATLAB control-point sessions can be brought over with `uv run lightsuite brain import-matlab-control-points --help`. MATLAB `.mat` checkpoints are otherwise not read: rerun the Python stages.
+The same TIFF layouts and atlas files work in both, and Elastix transform files written by MATLAB still load. MATLAB control-point sessions can be brought over with `uv run lightsuite brain import-matlab-control-points --help`. MATLAB `.mat` checkpoints are otherwise not read: rerun the Python stages.
 
-The B-spline step matches MATLAB's metrics, optimizer, pyramid and iteration counts, with three deliberate differences:
+The B-spline step matches MATLAB's metrics, optimizer, pyramid, iteration counts and histogram bins (48), and like MATLAB it has no bending-energy penalty. Older configs with `registration.bspline_bending_weight` still load; the key is ignored, with a warning if it is not 0. One deliberate difference:
 
-- **Bending energy:** `registration.bspline_bending_weight` adds a smoothness term MATLAB does not have. Set it to `0` to match MATLAB.
-- **Histogram bins:** written explicitly as 32 (MATLAB inherits 32 from its defaults file).
 - **Step size estimation:** `ASGDParameterEstimationMethod` is `DisplacementDistribution`; MATLAB's default `Original` takes larger steps that can fold the grid.
 
 ## Limitations
